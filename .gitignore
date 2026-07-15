@@ -5,4 +5,5 @@
 *.iml
 *.jks
 *.keystore
+!app/test-signing.jks
 scan-results/

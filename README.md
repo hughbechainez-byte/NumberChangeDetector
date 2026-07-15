@@ -14,4 +14,6 @@ Install `app\build\outputs\apk\debug\app-debug.apk`, choose a video, select its 
 
 ## Validated baseline
 
-Version 0.1.0 was exercised in-app on an API 35 emulator against the 3,600-second fixture with SHA-256 `DC6508A164983E6A30C3F0E114E54B6FFBCD4EEFF65E5FABF360EC0E87848258`. It found all 10 transitions from `none -> 1` through `9 -> 10`; every reported timestamp matched the labeled frame PTS exactly, with a 132.745-second scan runtime (27.12x realtime).
+Version 0.1.1 was exercised in-app on an API 35 emulator against the 3,600-second fixture with SHA-256 `DC6508A164983E6A30C3F0E114E54B6FFBCD4EEFF65E5FABF360EC0E87848258`. It found all 10 transitions from `none -> 1` through `9 -> 10`; every reported timestamp matched the labeled frame PTS exactly, with a 132.745-second scan runtime (27.12x realtime).
+
+Tester builds use the checked-in `app/test-signing.jks` solely to keep sideloaded GitHub APK upgrades compatible. This public test key must never be reused for a production app.

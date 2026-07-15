@@ -11,12 +11,24 @@ android {
         applicationId = "com.hughbechainez.numberchangedetector"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("tester") {
+            storeFile = file("test-signing.jks")
+            storePassword = "numberdetector"
+            keyAlias = "numberchangedetector"
+            keyPassword = "numberdetector"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("tester")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
