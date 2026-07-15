@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">CompilationMaker Scanner Prototype</string>
+    <string name="prototype_title">CompilationMaker Prototype - v0.17.25 base</string>
+    <string name="transition_results_label">Detected number changes</string>
+    <string name="transition_results_empty">No scan results yet</string>
+    <string name="transition_results_scanning">Scanning for number changes…</string>
+    <string name="transition_results_none_confirmed">No confirmed number changes were recorded</string>
+</resources>

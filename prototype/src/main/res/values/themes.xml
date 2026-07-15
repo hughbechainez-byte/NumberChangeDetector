@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.CompilationMaker" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#1e88e5</item>
+        <item name="colorPrimaryVariant">#005cb2</item>
+        <item name="colorOnPrimary">#ffffff</item>
+        <item name="colorSecondary">#26a69a</item>
+        <item name="android:statusBarColor">#ffffff</item>
+    </style>
+</resources>

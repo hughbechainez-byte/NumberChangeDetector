@@ -1,4 +1,4 @@
-name: Build and release test APK
+name: Build and release prototype APK
 
 on:
   push:
@@ -22,21 +22,21 @@ jobs:
       - name: Build and test
         run: |
           chmod +x ./gradlew
-          ./gradlew clean test assembleDebug
+          ./gradlew clean :scanner:test :prototype:testDebugUnitTest :prototype:lintDebug :prototype:assembleDebug
       - name: Prepare APK
         id: artifact
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/NumberChangeDetector-${GITHUB_REF_NAME}.apk"
-          echo "apk=dist/NumberChangeDetector-${GITHUB_REF_NAME}.apk" >> "$GITHUB_OUTPUT"
+          cp prototype/build/outputs/apk/debug/prototype-debug.apk "dist/CompilationMaker-Prototype-${GITHUB_REF_NAME}.apk"
+          echo "apk=dist/CompilationMaker-Prototype-${GITHUB_REF_NAME}.apk" >> "$GITHUB_OUTPUT"
       - name: Publish release asset
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ github.ref_name }}
-          name: "Number Change Detector ${{ github.ref_name }}"
+          name: "CompilationMaker Number Detector Prototype ${{ github.ref_name }}"
           artifacts: ${{ steps.artifact.outputs.apk }}
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           makeLatest: true
           generateReleaseNotes: true
-          body: "Barebones tester APK. It is debug-signed so it can be installed directly for evaluation."
+          body: "CompilationMaker prototype with the sparse PTS-aware number-change scanner integrated. This separately packaged tester build does not update or replace the production CompilationMaker app."

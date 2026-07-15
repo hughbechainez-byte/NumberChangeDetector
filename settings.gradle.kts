@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "NumberChangeDetector"
-include(":app", ":scanner")
+include(":app", ":scanner", ":prototype")
