@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.NumberChangeDetector" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/teal</item>
+        <item name="colorPrimaryVariant">@color/navy</item>
+        <item name="colorOnPrimary">@color/navy</item>
+        <item name="android:navigationBarColor">@color/navy</item>
+    </style>
+</resources>

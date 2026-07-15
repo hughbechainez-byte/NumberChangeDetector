@@ -1,0 +1,42 @@
+name: Build and release test APK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build and test
+        run: |
+          chmod +x ./gradlew
+          ./gradlew clean test assembleDebug
+      - name: Prepare APK
+        id: artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/NumberChangeDetector-${GITHUB_REF_NAME}.apk"
+          echo "apk=dist/NumberChangeDetector-${GITHUB_REF_NAME}.apk" >> "$GITHUB_OUTPUT"
+      - name: Publish release asset
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: "Number Change Detector ${{ github.ref_name }}"
+          artifacts: ${{ steps.artifact.outputs.apk }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
+          makeLatest: true
+          generateReleaseNotes: true
+          body: "Barebones tester APK. It is debug-signed so it can be installed directly for evaluation."
