@@ -1,0 +1,26 @@
+{
+  "version": "0.2.1",
+  "versionCode": 3,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.2.1/CompilationMaker-Prototype-v0.2.1.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.2.1",
+  "sha256": "535ab6b42e3a815f3fd04268bf907b7045d0b4262a531baf3c4b06f4aab58250",
+  "notes": "CompilationMaker 0.17.26 prototype with the sparse PTS-aware number-change scanner integrated.",
+  "updates": [
+    {
+      "version": "0.2.1",
+      "versionCode": 3,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.2.1/CompilationMaker-Prototype-v0.2.1.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.2.1",
+      "sha256": "535ab6b42e3a815f3fd04268bf907b7045d0b4262a531baf3c4b06f4aab58250",
+      "notes": "Latest tester build; includes v0.17.26 finite-report and confirmed-candidate deduplication fixes."
+    },
+    {
+      "version": "0.2.0",
+      "versionCode": 2,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.2.0/CompilationMaker-Prototype-v0.2.0.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.2.0",
+      "sha256": "80d37acc58b73e1f143b5a14d540884bc9d670591da187f7b221b49101893336",
+      "notes": "Initial integrated prototype based on CompilationMaker 0.17.25."
+    }
+  ]
+}
