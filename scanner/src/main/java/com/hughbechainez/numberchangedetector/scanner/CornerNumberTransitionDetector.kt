@@ -2,6 +2,7 @@ package com.hughbechainez.numberchangedetector.scanner
 
 import android.content.Context
 import android.graphics.Bitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlin.math.abs
@@ -19,12 +20,28 @@ class CornerNumberTransitionDetector(
     override suspend fun detect(
         request: TransitionDetectionRequest,
         onProgress: suspend (DetectionProgress) -> Unit
+    ): TransitionDetectionResult = detectWithCoreActivity(request, onProgress)
+
+    suspend fun detectWithCoreActivity(
+        request: TransitionDetectionRequest,
+        onProgress: suspend (DetectionProgress) -> Unit = {},
+        onCoreActivity: suspend (CoreActivityEvent) -> Unit = {}
     ): TransitionDetectionResult {
         val started = android.os.SystemClock.elapsedRealtime()
         val warnings = ArrayList<String>()
         val cache = HashMap<Long, DigitEvidence>()
         var decodedFrames = 0
         val roi = request.roi.normalized()
+
+        suspend fun emitCore(event: CoreActivityEvent) {
+            try {
+                onCoreActivity(event)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Diagnostic telemetry must never change scan decisions or timestamps.
+            }
+        }
 
         samplerFactory(request.sourceUri).use { sampler ->
             recognizerFactory().use { recognizer ->
@@ -38,11 +55,28 @@ class CornerNumberTransitionDetector(
                     val safeTime = timeMs.coerceIn(0L, metadata.durationMs)
                     val cached = cache[safeTime]
                     if (cached != null && (cached.parsedNumber != null || !aggressive)) {
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.OCR,
+                                "cache-hit",
+                                "reusing ${cached.status} value=${cached.parsedNumber ?: "none"}",
+                                requestedTimeMs = safeTime,
+                                actualFramePtsMs = cached.actualFramePtsMs
+                            )
+                        )
                         return if (exactPresentationTime && cached.actualFramePtsMs == null) {
                             cached.copy(actualFramePtsMs = safeTime).also { cache[safeTime] = it }
                         } else cached
                     }
 
+                    emitCore(
+                        CoreActivityEvent(
+                            CoreActivityStage.FRAME_FETCH,
+                            "request",
+                            "targetWidth=${request.targetFrameWidthPx}px exactPts=$exactPresentationTime",
+                            requestedTimeMs = safeTime
+                        )
+                    )
                     val frame = sampler.frameAt(safeTime, request.targetFrameWidthPx)
                         ?: return DigitEvidence(
                             requestedTimeMs = safeTime,
@@ -53,14 +87,69 @@ class CornerNumberTransitionDetector(
                             branch = "none",
                             status = DigitRecognitionStatus.INVALID_FRAME,
                             elapsedMs = 0L
-                        ).also { cache[safeTime] = it }
+                        ).also {
+                            emitCore(
+                                CoreActivityEvent(
+                                    CoreActivityStage.FRAME_FETCH,
+                                    "missing",
+                                    "decoder returned no frame",
+                                    requestedTimeMs = safeTime
+                                )
+                            )
+                            cache[safeTime] = it
+                        }
                     decodedFrames++
+                    emitCore(
+                        CoreActivityEvent(
+                            CoreActivityStage.FRAME_FETCH,
+                            "decoded",
+                            "frame=${frame.bitmap.width}x${frame.bitmap.height}",
+                            requestedTimeMs = safeTime,
+                            actualFramePtsMs = frame.presentationTimeMs
+                        )
+                    )
                     try {
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.PREPROCESS,
+                                "crop-roi",
+                                "roi=${roi.xFraction},${roi.yFraction},${roi.widthFraction},${roi.heightFraction}",
+                                requestedTimeMs = safeTime,
+                                actualFramePtsMs = frame.presentationTimeMs
+                            )
+                        )
                         val cropped = crop(frame.bitmap, roi)
                         try {
                             val prepared = prepareForOcr(cropped)
                             try {
+                                emitCore(
+                                    CoreActivityEvent(
+                                        CoreActivityStage.PREPROCESS,
+                                        "ocr-ready",
+                                        "crop=${cropped.width}x${cropped.height} input=${prepared.width}x${prepared.height}",
+                                        requestedTimeMs = safeTime,
+                                        actualFramePtsMs = frame.presentationTimeMs
+                                    )
+                                )
+                                emitCore(
+                                    CoreActivityEvent(
+                                        CoreActivityStage.OCR,
+                                        "infer",
+                                        "aggressive=$aggressive",
+                                        requestedTimeMs = safeTime,
+                                        actualFramePtsMs = frame.presentationTimeMs
+                                    )
+                                )
                                 val recognition = recognizer.recognize(prepared, aggressive)
+                                emitCore(
+                                    CoreActivityEvent(
+                                        CoreActivityStage.OCR,
+                                        "result",
+                                        "status=${recognition.status} value=${recognition.value ?: "none"} branch=${recognition.branch} elapsed=${recognition.elapsedMs}ms",
+                                        requestedTimeMs = safeTime,
+                                        actualFramePtsMs = frame.presentationTimeMs
+                                    )
+                                )
                                 return DigitEvidence(
                                     requestedTimeMs = safeTime,
                                     actualFramePtsMs = safeTime.takeIf { exactPresentationTime },
@@ -121,7 +210,15 @@ class CornerNumberTransitionDetector(
                             percent
                         )
                     )
-                    val mark = refineBracket(bracket, sampler, metadata.durationMs, ::recognizeAt)
+                    val mark = refineBracket(
+                        bracket = bracket,
+                        sampler = sampler,
+                        durationMs = metadata.durationMs,
+                        recognize = ::recognizeAt,
+                        emitCore = ::emitCore,
+                        candidateIndex = index + 1,
+                        candidateCount = brackets.size
+                    )
                     if (mark == null) {
                         warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
                     } else if (marks.none {
@@ -162,22 +259,67 @@ class CornerNumberTransitionDetector(
         bracket: TransitionBracket,
         sampler: FrameSampler,
         durationMs: Long,
-        recognize: suspend (Long, Boolean, Boolean) -> DigitEvidence
+        recognize: suspend (Long, Boolean, Boolean) -> DigitEvidence,
+        emitCore: suspend (CoreActivityEvent) -> Unit,
+        candidateIndex: Int,
+        candidateCount: Int
     ): TransitionMark? {
+        emitCore(
+            CoreActivityEvent(
+                CoreActivityStage.PTS_ENUMERATION,
+                "candidate-start",
+                "candidate=$candidateIndex/$candidateCount ${bracket.fromNumber ?: "none"}->${bracket.toNumber} range=${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}",
+                requestedTimeMs = bracket.startMs
+            )
+        )
         var sampleTimes = sampler.presentationTimesBetween(bracket.startMs, bracket.endMs)
             .filter { it in bracket.startMs..bracket.endMs }
             .distinct()
             .sorted()
+        emitCore(
+            CoreActivityEvent(
+                CoreActivityStage.PTS_ENUMERATION,
+                "samples",
+                "candidate=$candidateIndex/$candidateCount extractorPts=${sampleTimes.size}",
+                requestedTimeMs = bracket.startMs
+            )
+        )
         if (sampleTimes.isEmpty()) {
             sampleTimes = generateFallbackTimes(bracket.startMs, bracket.endMs, durationMs)
+            emitCore(
+                CoreActivityEvent(
+                    CoreActivityStage.PTS_ENUMERATION,
+                    "fallback-grid",
+                    "candidate=$candidateIndex/$candidateCount samples=${sampleTimes.size}",
+                    requestedTimeMs = bracket.startMs
+                )
+            )
         }
         if (sampleTimes.isEmpty()) return null
 
         val observed = LinkedHashMap<Long, DigitEvidence>()
         suspend fun valueAt(index: Int): Int? {
             val time = sampleTimes[index]
+            emitCore(
+                CoreActivityEvent(
+                    CoreActivityStage.PTS_CONFIRMATION,
+                    "sample",
+                    "candidate=$candidateIndex/$candidateCount index=$index/${sampleTimes.lastIndex}",
+                    requestedTimeMs = time,
+                    actualFramePtsMs = time
+                )
+            )
             val evidence = recognize(time, true, true)
             observed[time] = evidence
+            emitCore(
+                CoreActivityEvent(
+                    CoreActivityStage.PTS_CONFIRMATION,
+                    "observed",
+                    "candidate=$candidateIndex/$candidateCount index=$index value=${evidence.parsedNumber ?: "none"} status=${evidence.status}",
+                    requestedTimeMs = time,
+                    actualFramePtsMs = evidence.actualFramePtsMs ?: time
+                )
+            )
             return evidence.parsedNumber
         }
 
@@ -185,12 +327,32 @@ class CornerNumberTransitionDetector(
         var high = sampleTimes.lastIndex
         while (low < high) {
             val middle = low + (high - low) / 2
+            emitCore(
+                CoreActivityEvent(
+                    CoreActivityStage.BINARY_SEARCH,
+                    "probe",
+                    "candidate=$candidateIndex/$candidateCount low=$low mid=$middle high=$high target=${bracket.toNumber}",
+                    requestedTimeMs = sampleTimes[middle],
+                    actualFramePtsMs = sampleTimes[middle]
+                )
+            )
             if (valueAt(middle) == bracket.toNumber) high = middle else low = middle + 1
         }
 
         val searchStart = max(0, low - 6)
         val searchEnd = min(sampleTimes.lastIndex, low + 8)
-        for (index in searchStart..searchEnd) valueAt(index)
+        for (index in searchStart..searchEnd) {
+            emitCore(
+                CoreActivityEvent(
+                    CoreActivityStage.PTS_CONFIRMATION,
+                    "neighborhood",
+                    "candidate=$candidateIndex/$candidateCount index=$index range=$searchStart..$searchEnd",
+                    requestedTimeMs = sampleTimes[index],
+                    actualFramePtsMs = sampleTimes[index]
+                )
+            )
+            valueAt(index)
+        }
 
         val boundaryIndex = (searchStart..searchEnd).firstOrNull { index ->
             observed[sampleTimes[index]]?.parsedNumber == bracket.toNumber &&
@@ -200,6 +362,15 @@ class CornerNumberTransitionDetector(
         } ?: return null
 
         val boundaryMs = sampleTimes[boundaryIndex]
+        emitCore(
+            CoreActivityEvent(
+                CoreActivityStage.PTS_CONFIRMATION,
+                "boundary",
+                "candidate=$candidateIndex/$candidateCount confirmed ${bracket.fromNumber ?: "none"}->${bracket.toNumber}",
+                requestedTimeMs = boundaryMs,
+                actualFramePtsMs = boundaryMs
+            )
+        )
         val targetEvidence = observed.values.filter {
             it.parsedNumber == bracket.toNumber && it.requestedTimeMs in boundaryMs..(boundaryMs + 1_000L)
         }

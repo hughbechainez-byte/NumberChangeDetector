@@ -23,6 +23,7 @@ class ForegroundManifestTest {
         assertTrue(permissionNames.contains("android.permission.FOREGROUND_SERVICE"))
         assertTrue(permissionNames.contains("android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING"))
         assertTrue(permissionNames.contains("android.permission.FOREGROUND_SERVICE_DATA_SYNC"))
+        assertTrue(permissionNames.contains("android.permission.WAKE_LOCK"))
 
         val services = document.getElementsByTagName("service")
         val foregroundServices = (0 until services.length).map { services.item(it) }.filter { service ->
@@ -35,6 +36,13 @@ class ForegroundManifestTest {
             service.attributes.getNamedItemNS(ANDROID_NS, "foregroundServiceType")?.nodeValue
         )
         assertEquals("merge", service.attributes.getNamedItemNS(TOOLS_NS, "node")?.nodeValue)
+
+        val activities = document.getElementsByTagName("activity")
+        val mainActivity = (0 until activities.length).map { activities.item(it) }.single { activity ->
+            activity.attributes.getNamedItemNS(ANDROID_NS, "name")?.nodeValue == ".MainActivity"
+        }
+        assertEquals("true", mainActivity.attributes.getNamedItemNS(ANDROID_NS, "supportsPictureInPicture")?.nodeValue)
+        assertEquals("true", mainActivity.attributes.getNamedItemNS(ANDROID_NS, "resizeableActivity")?.nodeValue)
     }
 
     private fun locateManifest(): File {

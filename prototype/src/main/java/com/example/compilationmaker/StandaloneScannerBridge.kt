@@ -3,6 +3,7 @@ package com.example.compilationmaker
 import android.content.Context
 import android.net.Uri
 import com.hughbechainez.numberchangedetector.scanner.CornerNumberTransitionDetector
+import com.hughbechainez.numberchangedetector.scanner.CoreActivityEvent
 import com.hughbechainez.numberchangedetector.scanner.DetectionProgress
 import com.hughbechainez.numberchangedetector.scanner.DigitEvidence
 import com.hughbechainez.numberchangedetector.scanner.ScanProfile as DetectorScanProfile
@@ -53,9 +54,10 @@ internal class StandaloneScannerBridge(private val context: Context) {
         sourceUri: Uri,
         scanWindow: ScanWindow,
         requestedIntervalMs: Long,
-        progress: (CompilationPipelineState, String, Int) -> Unit
+        progress: (CompilationPipelineState, String, Int) -> Unit,
+        coreActivity: (CoreActivityEvent) -> Unit = {}
     ): StandaloneScanBridgeResult {
-        val result = CornerNumberTransitionDetector(context).detect(
+        val result = CornerNumberTransitionDetector(context).detectWithCoreActivity(
             request = TransitionDetectionRequest(
                 sourceUri = sourceUri,
                 roi = DetectorScanWindow(
@@ -66,11 +68,13 @@ internal class StandaloneScannerBridge(private val context: Context) {
                 ),
                 profile = standaloneProfileFor(requestedIntervalMs),
                 targetFrameWidthPx = 640
-            )
-        ) { detectorProgress ->
-            val mapped = mapStandaloneProgress(detectorProgress)
-            progress(mapped.state, mapped.message, mapped.percent)
-        }
+            ),
+            onProgress = { detectorProgress ->
+                val mapped = mapStandaloneProgress(detectorProgress)
+                progress(mapped.state, mapped.message, mapped.percent)
+            },
+            onCoreActivity = { event -> coreActivity(event) }
+        )
         val plan = mapStandaloneResult(result)
         val reportPath = persistStandaloneReport(context, result, plan)
         return plan.copy(reportPath = reportPath)

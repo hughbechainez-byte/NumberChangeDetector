@@ -129,6 +129,23 @@ data class TransitionDetectionResult(
 
 data class DetectionProgress(val phase: String, val message: String, val percent: Int)
 
+enum class CoreActivityStage {
+    FRAME_FETCH,
+    PREPROCESS,
+    OCR,
+    PTS_ENUMERATION,
+    BINARY_SEARCH,
+    PTS_CONFIRMATION
+}
+
+data class CoreActivityEvent(
+    val stage: CoreActivityStage,
+    val action: String,
+    val detail: String,
+    val requestedTimeMs: Long? = null,
+    val actualFramePtsMs: Long? = null
+)
+
 data class FrameSample(
     val requestedTimeMs: Long,
     val presentationTimeMs: Long?,

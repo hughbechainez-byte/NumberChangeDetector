@@ -13,6 +13,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -111,6 +112,9 @@ private fun JSONObject.putFiniteNullable(key: String, value: Float?) {
     put(key, value?.takeIf { it.isFinite() } ?: JSONObject.NULL)
 }
 
+private const val KEY_CORE_STATUS_ENABLED = "core_status_enabled"
+private const val CORE_STATUS_SAMPLE_INTERVAL_MS = 250L
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
@@ -120,6 +124,7 @@ class MainActivity : AppCompatActivity() {
     private val statusFeedLines = ArrayDeque<String>()
     private val logTag = "CompilationMaker"
     private val previewHandler = Handler(Looper.getMainLooper())
+    private val backgroundStatusHandler = Handler(Looper.getMainLooper())
     private var selectedPreviewMs = 0
     private var lastProgressText = ""
     private var lastProgressPercent = -1
@@ -227,6 +232,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var backgroundStatusBanner: TextView
     private lateinit var statusFeedText: TextView
     private lateinit var statusFeedScroll: ScrollView
+    private lateinit var coreStatusSwitch: CheckBox
+    private lateinit var mainContent: ScrollView
+    private lateinit var pipStatusContainer: View
+    private lateinit var pipPhaseText: TextView
+    private lateinit var pipPercentText: TextView
+    private lateinit var pipProgressBar: ProgressBar
+    private lateinit var pipStatusText: TextView
+    private lateinit var pipSignalText: TextView
+    private lateinit var pipLogText: TextView
     private lateinit var checkUpdatesButton: Button
     private lateinit var crashLogButton: Button
     private lateinit var transitionResultsText: TextView
@@ -247,6 +261,7 @@ class MainActivity : AppCompatActivity() {
     private val updateNotificationChannelId = "compilation_updates"
     private val updateNotificationId = 6110
     private val workManager by lazy { WorkManager.getInstance(this) }
+    @Volatile
     private var compilationWorkId: UUID? = null
     private var activeWorkInfoLiveData: LiveData<WorkInfo?>? = null
     private var activeWorkObserver: Observer<WorkInfo?>? = null
@@ -256,6 +271,18 @@ class MainActivity : AppCompatActivity() {
     private var compilationStartInFlight = false
     private var compilationRestoreInFlight = false
     private var terminalHandlingWorkId: UUID? = null
+    private val backgroundStatusPrefs by lazy { getSharedPreferences("background_status_prefs", MODE_PRIVATE) }
+    @Volatile
+    private var backgroundStatusMode = BackgroundStatusMode.CONCISE
+    private var previousBackgroundStatus: BackgroundStatusSnapshot? = null
+    private var lastBackgroundFeedAtMs = 0L
+    private val coreActivityLock = Any()
+    private var pendingCoreActivity: CompilationCoreActivity? = null
+    private var coreActivityRenderScheduled = false
+    private val coreActivityListener: (CompilationCoreActivity) -> Unit = { activity ->
+        queueCoreActivity(activity)
+    }
+    private val coreActivityRenderer = Runnable { renderPendingCoreActivity() }
     private val updateManifestRawEndpoint =
         "https://raw.githubusercontent.com/hughbechainez-byte/NumberChangeDetector/main/prototype-update.json"
     private val updateManifestBlobEndpoint =
@@ -273,6 +300,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         setUpUi()
+        CoreActivityTelemetry.addListener(coreActivityListener)
         ensureProgressNotificationChannel()
         ensureUpdateNotificationChannel()
         requestPermissionsIfNeeded()
@@ -287,13 +315,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onUserLeaveHint() {
         if (hasActiveCompilation() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isInPictureInPictureMode) {
-            val params = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(16, 9))
-                .build()
-            runCatching { enterPictureInPictureMode(params) }
-                .onFailure { AppLog.w(this, logTag, "Could not enter background status picture-in-picture", it) }
+            updatePictureInPictureParams(activeJob = true)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                runCatching { enterPictureInPictureMode(buildPictureInPictureParams(activeJob = true)) }
+                    .onFailure { AppLog.w(this, logTag, "Could not enter background status picture-in-picture", it) }
+            }
         }
         super.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        renderPictureInPictureMode(isInPictureInPictureMode)
     }
 
     override fun onResume() {
@@ -304,6 +340,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         dismissCompilationWorkObserver()
+        CoreActivityTelemetry.removeListener(coreActivityListener)
+        backgroundStatusHandler.removeCallbacks(coreActivityRenderer)
         stopPreviewProgressUpdates()
         stopCompilationPreviewProgressUpdates()
         pendingCompilationFile = null
@@ -339,6 +377,15 @@ class MainActivity : AppCompatActivity() {
         backgroundStatusBanner = binding.backgroundStatusBanner
         statusFeedText = binding.statusFeedText
         statusFeedScroll = binding.statusFeedScroll
+        coreStatusSwitch = binding.coreStatusSwitch
+        mainContent = binding.mainContent
+        pipStatusContainer = binding.pipStatusContainer
+        pipPhaseText = binding.pipPhaseText
+        pipPercentText = binding.pipPercentText
+        pipProgressBar = binding.pipProgressBar
+        pipStatusText = binding.pipStatusText
+        pipSignalText = binding.pipSignalText
+        pipLogText = binding.pipLogText
         checkUpdatesButton = binding.checkUpdatesButton
         crashLogButton = binding.crashLogButton
         transitionResultsText = binding.transitionResultsText
@@ -604,6 +651,24 @@ class MainActivity : AppCompatActivity() {
             experimentalModeWarningText.visibility = if (checked) View.VISIBLE else View.GONE
         }
 
+        backgroundStatusMode = if (backgroundStatusPrefs.getBoolean(KEY_CORE_STATUS_ENABLED, false)) {
+            BackgroundStatusMode.CORE_ACTIVITY
+        } else {
+            BackgroundStatusMode.CONCISE
+        }
+        coreStatusSwitch.isChecked = backgroundStatusMode == BackgroundStatusMode.CORE_ACTIVITY
+        coreStatusSwitch.setOnCheckedChangeListener { _, checked ->
+            backgroundStatusMode = if (checked) {
+                BackgroundStatusMode.CORE_ACTIVITY
+            } else {
+                BackgroundStatusMode.CONCISE
+            }
+            backgroundStatusPrefs.edit().putBoolean(KEY_CORE_STATUS_ENABLED, checked).apply()
+            previousBackgroundStatus = null
+            lastBackgroundFeedAtMs = 0L
+            addStatusLine("Status display: ${backgroundStatusMode.label}")
+        }
+
         qualitySpinner.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
@@ -645,6 +710,8 @@ class MainActivity : AppCompatActivity() {
         binding.progressBar.max = 100
         progressPercentText.text = "0%"
         clearStatusFeed("Ready")
+        renderPictureInPictureMode(isInPictureInPictureMode)
+        updatePictureInPictureParams(activeJob = false)
         if (readCrashReport(this) != null) {
             emitLogStatus("Crash log available. Tap Open crash log.")
         }
@@ -939,9 +1006,8 @@ class MainActivity : AppCompatActivity() {
                 val nextState = explicitState ?: pipelineStateForProgressPhase(phase, currentPipelineState.takeIf { it.isActive }
                     ?: CompilationPipelineState.PREPARING)
                 currentPipelineState = nextState
-                compilationJobStore.updateState(workInfo.id.toString(), nextState, phase, message, percent)
                 renderTransitionResults(compilationJobStore.load())
-                emitCompilationProgress("$phase: $message", percent)
+                emitCompilationProgress(message, percent, phase, nextState)
                 isBusy = true
                 setUiBusy(true)
             }
@@ -1855,6 +1921,96 @@ class MainActivity : AppCompatActivity() {
         return@withContext privateOut.absolutePath
     }
 
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun buildPictureInPictureParams(activeJob: Boolean): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder
+                .setAutoEnterEnabled(activeJob)
+                .setSeamlessResizeEnabled(false)
+        }
+        return builder.build()
+    }
+
+    private fun updatePictureInPictureParams(activeJob: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        runCatching { setPictureInPictureParams(buildPictureInPictureParams(activeJob)) }
+            .onFailure { AppLog.w(this, logTag, "Could not update picture-in-picture parameters", it) }
+    }
+
+    private fun renderPictureInPictureMode(inPictureInPicture: Boolean) {
+        if (!::mainContent.isInitialized || !::pipStatusContainer.isInitialized) return
+        mainContent.visibility = if (inPictureInPicture) View.GONE else View.VISIBLE
+        pipStatusContainer.visibility = if (inPictureInPicture) View.VISIBLE else View.GONE
+    }
+
+    private fun queueCoreActivity(activity: CompilationCoreActivity) {
+        if (backgroundStatusMode != BackgroundStatusMode.CORE_ACTIVITY) return
+        val observedWorkId = compilationWorkId?.toString() ?: return
+        if (activity.workId != observedWorkId) return
+        synchronized(coreActivityLock) {
+            pendingCoreActivity = activity
+            if (coreActivityRenderScheduled) return
+            coreActivityRenderScheduled = true
+        }
+        backgroundStatusHandler.postDelayed(coreActivityRenderer, CORE_STATUS_SAMPLE_INTERVAL_MS)
+    }
+
+    private fun renderPendingCoreActivity() {
+        val activity = synchronized(coreActivityLock) {
+            val latest = pendingCoreActivity
+            pendingCoreActivity = null
+            coreActivityRenderScheduled = false
+            latest
+        } ?: return
+        if (backgroundStatusMode != BackgroundStatusMode.CORE_ACTIVITY) return
+
+        val event = activity.event
+        val timestampMs = event.actualFramePtsMs ?: event.requestedTimeMs
+        val timestamp = timestampMs?.let(::formatTransitionTimestampMs)?.let { " @ $it" }.orEmpty()
+        val phase = event.stage.name.lowercase(Locale.US).replace('_', ' ')
+        val message = "${event.action}$timestamp | ${event.detail}"
+        val snapshot = BackgroundStatusSnapshot(
+            phase = phase,
+            pipelineState = currentPipelineState,
+            workManagerState = latestWorkManagerState?.name ?: "RUNNING",
+            message = message,
+            percent = lastProgressPercent.coerceAtLeast(0),
+            observedAtMs = SystemClock.elapsedRealtime()
+        )
+        renderBackgroundStatus(snapshot, forceAppend = true)
+    }
+
+    private fun renderBackgroundStatus(snapshot: BackgroundStatusSnapshot, forceAppend: Boolean = false) {
+        val coreStyle = backgroundStatusMode == BackgroundStatusMode.CORE_ACTIVITY
+        pipPhaseText.text = snapshot.phase.ifBlank { snapshot.pipelineState.name }.replace('_', ' ')
+        pipPercentText.text = "${snapshot.safePercent}%"
+        pipProgressBar.progress = snapshot.safePercent
+        pipStatusText.text = snapshot.message
+        pipSignalText.text = "Foreground worker ${snapshot.workManagerState} | signal ${DateFormat.format("HH:mm:ss", System.currentTimeMillis())}"
+        backgroundStatusBanner.text = "Background processing: ${snapshot.safePercent}% • ${snapshot.message}"
+
+        val append = forceAppend || shouldAppendBackgroundStatus(
+            mode = backgroundStatusMode,
+            previous = previousBackgroundStatus,
+            current = snapshot,
+            lastFeedAtMs = lastBackgroundFeedAtMs
+        )
+        if (append) {
+            addStatusLine(formatBackgroundStatus(snapshot, coreStyle))
+            lastBackgroundFeedAtMs = snapshot.observedAtMs
+        }
+        previousBackgroundStatus = snapshot
+        renderPipLog()
+    }
+
+    private fun renderPipLog() {
+        val lineCount = if (backgroundStatusMode == BackgroundStatusMode.CORE_ACTIVITY) 3 else 1
+        pipLogText.text = statusFeedLines.toList().takeLast(lineCount).joinToString("\n")
+            .ifBlank { "Waiting for worker signal" }
+    }
+
     private fun setUiBusy(busy: Boolean) {
         runOnUiThread {
             binding.processButton.isEnabled = !busy
@@ -1883,6 +2039,7 @@ class MainActivity : AppCompatActivity() {
             progressPercentText.visibility = View.VISIBLE
             statusFeedScroll.visibility = View.VISIBLE
             backgroundStatusBanner.visibility = if (busy) View.VISIBLE else View.GONE
+            updatePictureInPictureParams(activeJob = busy)
         }
     }
 
@@ -1906,7 +2063,12 @@ class MainActivity : AppCompatActivity() {
         displayTransitionSummaries(record?.clipPlanJson.orEmpty(), emptyMessage)
     }
 
-    private fun emitCompilationProgress(message: String, percent: Int) {
+    private fun emitCompilationProgress(
+        message: String,
+        percent: Int,
+        phase: String? = null,
+        pipelineState: CompilationPipelineState = currentPipelineState
+    ) {
         val percentValue = percent.coerceIn(0, 100)
         val now = SystemClock.elapsedRealtime()
         if (percentValue == lastProgressPercent && message == lastProgressText && now - lastProgressUpdateMs < 250L) return
@@ -1915,12 +2077,21 @@ class MainActivity : AppCompatActivity() {
         lastProgressUpdateMs = now
         AppLog.i(this, logTag, "Progress $percentValue%: $message")
         runOnUiThread {
-            binding.statusText.text = message
+            val visibleMessage = phase?.let { "$it: $message" } ?: message
+            binding.statusText.text = visibleMessage
             progressPercentText.text = "$percentValue%"
             binding.progressBar.progress = percentValue
-            backgroundStatusBanner.text = "Background processing: $percentValue% • $message"
             backgroundStatusBanner.visibility = View.VISIBLE
-            addStatusLine(message)
+            renderBackgroundStatus(
+                BackgroundStatusSnapshot(
+                    phase = phase ?: pipelineState.name.lowercase(Locale.US),
+                    pipelineState = pipelineState,
+                    workManagerState = latestWorkManagerState?.name ?: if (pipelineState.isActive) "RUNNING" else "IDLE",
+                    message = message,
+                    percent = percentValue,
+                    observedAtMs = now
+                )
+            )
         }
         updateProgressNotification(message, percentValue, percentValue < 100)
     }
@@ -2051,6 +2222,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun clearStatusFeed(initialMessage: String) {
         statusFeedLines.clear()
+        previousBackgroundStatus = null
+        lastBackgroundFeedAtMs = 0L
         addStatusLine(initialMessage)
         binding.statusText.text = initialMessage
         progressPercentText.text = "0%"
@@ -2121,6 +2294,7 @@ class MainActivity : AppCompatActivity() {
         }
         statusFeedText.text = statusFeedLines.joinToString("\n")
         statusFeedScroll.post { statusFeedScroll.fullScroll(View.FOCUS_DOWN) }
+        if (::pipLogText.isInitialized) renderPipLog()
     }
 
     private fun roiStateKey(uri: Uri): String {

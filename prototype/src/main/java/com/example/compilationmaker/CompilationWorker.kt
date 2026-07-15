@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.system.Os
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -79,6 +80,23 @@ class CompilationWorker(
         val scanMode = ScanMode.values().getOrNull(scanModeOrdinal) ?: ScanMode.StableCheckpoint
         val scanWindow = parseScanWindow(scanWindowRaw)
         val engine = VideoCompilationEngine(applicationContext)
+        val wakeLock = runCatching {
+            val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "${applicationContext.packageName}:compilation"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(COMPILATION_WAKE_LOCK_TIMEOUT_MS)
+            }
+        }.onFailure { failure ->
+            AppLog.w(
+                applicationContext,
+                "CompilationWorker",
+                "Could not acquire the foreground compilation CPU wake lock",
+                failure
+            )
+        }.getOrNull()
         var fallbackUsed = false
         var failureReason: String? = null
         var outputForCleanup: File? = expectedOutputFile
@@ -96,7 +114,7 @@ class CompilationWorker(
             ) { state, message, percent ->
                 val phase = progressPhaseForState(state, scanMode)
                 setProgressCompat(phase, message, percent, pipelineState = state)
-                setForegroundCompat(phase, message, percent, pipelineState = state)
+                setForegroundCompat(phase, message, percent)
                 if (!isActive) {
                     throw CancellationException("Job cancelled")
                 }
@@ -106,7 +124,7 @@ class CompilationWorker(
                 fallbackUsed = true
                 failureReason = scanResult.failureReason
                 setProgressCompat("fallback", "Experimental mode failed, falling back to stable checkpoint", 50, true)
-                setForegroundCompat("fallback", "Experimental mode failed, falling back to stable checkpoint", 50, true)
+                setForegroundCompat("fallback", "Experimental mode failed, falling back to stable checkpoint", 50)
                 scanResult = runScanWithMode(
                     engine = engine,
                     sourceUri = sourceUri,
@@ -119,7 +137,7 @@ class CompilationWorker(
                 ) { state, message, percent ->
                     val phase = progressPhaseForState(state, ScanMode.StableCheckpoint)
                     setProgressCompat(phase, message, percent, pipelineState = state)
-                    setForegroundCompat(phase, message, percent, pipelineState = state)
+                    setForegroundCompat(phase, message, percent)
                     if (!isActive) throw CancellationException("Job cancelled")
                 }
             }
@@ -193,7 +211,7 @@ class CompilationWorker(
                 }
                 val terminalPhase = if (terminalState == CompilationPipelineState.NO_RESULTS) "no_results" else "failed"
                 setProgressCompat(terminalPhase, message, 100, fallbackUsed)
-                setForegroundCompat(terminalPhase, message, 100, fallbackUsed)
+                setForegroundCompat(terminalPhase, message, 100)
                 AppLog.i(applicationContext, "CompilationWorker", "[worker] returning ${decision.kind.name.lowercase()}: $message thread=${Thread.currentThread().name}")
                 return@withContext Result.failure(
                     workDataOf(
@@ -209,7 +227,7 @@ class CompilationWorker(
             }
 
             setProgressCompat("export", "Assembling compilation", 55, fallbackUsed)
-            setForegroundCompat("export", "Assembling compilation", 55, fallbackUsed)
+            setForegroundCompat("export", "Assembling compilation", 55)
             val renderedOutput = engine.renderCompilation(
                 sourceUri = sourceUri,
                 segments = windows,
@@ -220,13 +238,13 @@ class CompilationWorker(
             ) { message, percent ->
                 val exportPercent = ((percent * 0.35f) + 55f).toInt().coerceIn(55, 95)
                 setProgressCompat("export", message, exportPercent, fallbackUsed)
-                setForegroundCompat("export", message, exportPercent, fallbackUsed)
+                setForegroundCompat("export", message, exportPercent)
                 if (!isActive) throw CancellationException("Job cancelled")
             }
             outputForCleanup = renderedOutput.file
 
             setProgressCompat("verify", "Verifying compilation output", 96, fallbackUsed)
-            setForegroundCompat("verify", "Verifying compilation output", 96, fallbackUsed)
+            setForegroundCompat("verify", "Verifying compilation output", 96)
             val verifiedOutput = engine.verifyCompilationOutput(renderedOutput.file)
             val evidence = OutputVerificationEvidence(
                 uri = verifiedOutput.uri,
@@ -297,7 +315,7 @@ class CompilationWorker(
                 )
             }
             setProgressCompat(terminalPhase, completionMessage, 100, fallbackUsed, terminalState)
-            setForegroundCompat(terminalPhase, completionMessage, 100, fallbackUsed, terminalState)
+            setForegroundCompat(terminalPhase, completionMessage, 100)
             AppLog.i(
                 applicationContext,
                 "CompilationWorker",
@@ -347,6 +365,10 @@ class CompilationWorker(
             ))
         } finally {
             engine.close()
+            wakeLock?.takeIf { it.isHeld }?.let { heldWakeLock ->
+                runCatching { heldWakeLock.release() }
+                    .onFailure { AppLog.w(applicationContext, "CompilationWorker", "Wake-lock release failed", it) }
+            }
         }
     }
 
@@ -367,7 +389,8 @@ class CompilationWorker(
                     sourceUri = sourceUri,
                     scanWindow = scanWindow,
                     requestedIntervalMs = scanIntervalMs,
-                    progress = progress
+                    progress = progress,
+                    coreActivity = { event -> CoreActivityTelemetry.emit(id.toString(), event) }
                 )
                 ScanTaskResult(
                     success = true,
@@ -548,15 +571,12 @@ class CompilationWorker(
     private fun setForegroundCompat(
         phase: String,
         message: String,
-        percent: Int,
-        fallbackUsed: Boolean = false,
-        pipelineState: CompilationPipelineState = pipelineStateForProgressPhase(phase)
+        percent: Int
     ) {
         val safePercent = monotonicProgressPercent(
             CompilationJobStore(applicationContext).load()?.takeIf { it.workId == id.toString() }?.progressPercent ?: 0,
             percent
         )
-        publishProgressData(phase, message, safePercent, fallbackUsed, pipelineState)
         val notification = compileNotification(phase, message, safePercent)
         setForegroundAsync(createForegroundInfo(notification))
     }
@@ -686,6 +706,8 @@ class CompilationWorker(
         const val KEY_FALLBACK_USED = "fallbackUsed"
         const val KEY_NO_TRANSITIONS_DETECTED = "noTransitionsDetected"
         const val KEY_ERROR_MESSAGE = "errorMessage"
+
+        private const val COMPILATION_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
 
     }
 }

@@ -66,4 +66,39 @@ class CompilationLifecycleSourceTest {
         assertTrue(worker.contains("[worker] returning failure"))
         assertTrue(worker.contains("[worker] returning cancelled"))
     }
+
+    @Test
+    fun pictureInPictureUsesAutoEnterAndACompactStatusSurface() {
+        val activity = sourceRoot.resolve("MainActivity.kt").readText()
+        val layout = listOf(
+            File("src/main/res/layout/activity_main.xml"),
+            File("app/src/main/res/layout/activity_main.xml")
+        ).first(File::isFile).readText()
+
+        assertTrue(activity.contains("setAutoEnterEnabled(activeJob)"))
+        assertTrue(activity.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.S"))
+        assertTrue(activity.contains("override fun onPictureInPictureModeChanged"))
+        assertTrue(activity.contains("@Volatile"))
+        assertTrue(activity.contains("private var compilationWorkId"))
+        assertTrue(layout.contains("@+id/pipStatusContainer"))
+        assertTrue(layout.contains("@+id/pipPercentText"))
+        assertTrue(layout.contains("@+id/pipStatusText"))
+        assertTrue(layout.contains("@+id/coreStatusSwitch"))
+    }
+
+    @Test
+    fun coreTelemetryIsProcessLocalAndForegroundWakeLockIsBounded() {
+        val telemetry = sourceRoot.resolve("CoreActivityTelemetry.kt").readText()
+        val worker = sourceRoot.resolve("CompilationWorker.kt").readText()
+        val foregroundUpdate = worker.substringAfter("private fun setForegroundCompat(")
+            .substringBefore("private fun progressPhaseForState")
+
+        assertFalse(telemetry.contains("WorkManager."))
+        assertFalse(telemetry.contains("getSharedPreferences("))
+        assertFalse(telemetry.contains("AppLog."))
+        assertFalse(foregroundUpdate.contains("publishProgressData("))
+        assertTrue(worker.contains("acquire(COMPILATION_WAKE_LOCK_TIMEOUT_MS)"))
+        assertTrue(worker.contains("wakeLock?.takeIf { it.isHeld }"))
+        assertTrue(worker.contains("heldWakeLock.release()"))
+    }
 }
