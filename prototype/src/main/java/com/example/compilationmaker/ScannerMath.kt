@@ -376,18 +376,23 @@ fun classifyProvisionalTransition(evidence: ProvisionalTransitionEvidence): Plan
 fun selectTransitionPlanPoints(
     confirmedTimestampsMs: List<Long>,
     provisionalEvidence: List<ProvisionalTransitionEvidence>,
-    dedupeToleranceMs: Long
+    dedupeToleranceMs: Long,
+    confirmedCandidateIndices: Set<Int> = emptySet()
 ): List<PlannedTransitionPoint> {
     val confirmed = confirmedTimestampsMs.map { timestampMs ->
         PlannedTransitionPoint(
             timestampMs = timestampMs,
             classification = TransitionPlanClassification.CONFIRMED,
             confidence = 1f,
-            visualScore = Float.POSITIVE_INFINITY,
+            // Confirmed points are ordered by classification priority.  Keep the
+            // evidence value finite because it is serialized into the scan report.
+            visualScore = 0f,
             reason = "strict semantic confirmation"
         )
     }
-    val provisional = provisionalEvidence.mapNotNull(::classifyProvisionalTransition)
+    val provisional = provisionalEvidence.mapIndexedNotNull { index, evidence ->
+        if (index in confirmedCandidateIndices) null else classifyProvisionalTransition(evidence)
+    }
         .filter { point ->
             confirmed.isEmpty() || point.classification == TransitionPlanClassification.PROVISIONAL_HIGH
         }
@@ -423,12 +428,14 @@ fun selectTransitionPlanWithBaselineFallback(
     confirmedTimestampsMs: List<Long>,
     refinedEvidence: List<ProvisionalTransitionEvidence>,
     baselineEvidence: List<ProvisionalTransitionEvidence>,
-    dedupeToleranceMs: Long
+    dedupeToleranceMs: Long,
+    confirmedCandidateIndices: Set<Int> = emptySet()
 ): TransitionPlanSelection {
     val primary = selectTransitionPlanPoints(
         confirmedTimestampsMs = confirmedTimestampsMs,
         provisionalEvidence = refinedEvidence,
-        dedupeToleranceMs = dedupeToleranceMs
+        dedupeToleranceMs = dedupeToleranceMs,
+        confirmedCandidateIndices = confirmedCandidateIndices
     )
     if (confirmedTimestampsMs.isNotEmpty() || primary.isNotEmpty()) {
         return TransitionPlanSelection(primary, baselineFallbackUsed = false)

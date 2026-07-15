@@ -133,6 +133,61 @@ class ScannerMathTest {
     }
 
     @Test
+    fun confirmedCandidateIsNotReaddedWhenItsSeedIsFarFromRefinedBoundary() {
+        val points = selectTransitionPlanPoints(
+            confirmedTimestampsMs = listOf(255_000L),
+            provisionalEvidence = listOf(
+                ProvisionalTransitionEvidence(
+                    timestampMs = 270_000L,
+                    visualScore = 30f,
+                    fromNumber = 6,
+                    toNumber = 7,
+                    fromStateStable = true,
+                    toStateStable = true
+                )
+            ),
+            dedupeToleranceMs = 900L,
+            confirmedCandidateIndices = setOf(0)
+        )
+
+        assertEquals(listOf(255_000L), points.map { it.timestampMs })
+        assertEquals(TransitionPlanClassification.CONFIRMED, points.single().classification)
+        assertTrue(points.single().visualScore.isFinite())
+    }
+
+    @Test
+    fun tenConfirmedAndResidualProvisionalCandidatesProduceTenExactWindows() {
+        val boundaries = listOf(
+            30_000L, 75_000L, 255_000L, 855_000L, 975_000L,
+            1_275_000L, 1_395_000L, 1_995_000L, 2_415_000L, 3_560_000L
+        )
+        val strict = boundaries.take(8)
+        val evidence = boundaries.mapIndexed { index, timestamp ->
+            ProvisionalTransitionEvidence(
+                timestampMs = timestamp + if (index < 8) 15_000L else 0L,
+                visualScore = 20f + index,
+                fromNumber = index,
+                toNumber = index + 1,
+                fromStateStable = true,
+                toStateStable = true
+            )
+        }
+
+        val points = selectTransitionPlanPoints(
+            confirmedTimestampsMs = strict,
+            provisionalEvidence = evidence,
+            dedupeToleranceMs = 900L,
+            confirmedCandidateIndices = (0 until 8).toSet()
+        )
+        val segments = planExactTransitionSegments(points.map { it.timestampMs }.sorted(), 3_600_500L)
+
+        assertEquals(10, points.size)
+        assertEquals(10, segments.size)
+        assertEquals(400_000L, expectedCompilationDurationMs(segments))
+        assertTrue(points.all { it.visualScore.isFinite() })
+    }
+
+    @Test
     fun suppliedTwentyOneCheckpointRegressionCannotCollapseNineteenCandidatesToNoResults() {
         val simulatedCandidates = (0 until 19).map { index ->
             ProvisionalTransitionEvidence(

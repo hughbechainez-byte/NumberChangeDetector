@@ -1,6 +1,6 @@
 # Number Change Detector and CompilationMaker Prototype
 
-This sister repository contains both the original barebones number-change detector and a separately installable prototype of CompilationMaker 0.17.25 using the same sparse, PTS-aware scanner.
+This sister repository contains both the original barebones number-change detector and a separately installable prototype of CompilationMaker 0.17.26 using the same sparse, PTS-aware scanner.
 
 The modules are:
 
@@ -26,6 +26,6 @@ The prototype instrumentation test uses the one-hour Video A fixture with SHA-25
 
 ## Validated baseline
 
-Barebones version 0.1.1 was exercised in-app on an API 35 emulator against the 3,600-second fixture. It found all ten transitions, every timestamp matched the labeled frame PTS exactly, and scanning took 132.745 seconds (27.12x realtime). Prototype 0.2.0 passed the full API 35 fixture gate: ten exact frame-PTS transitions, ten clips totaling 400.000 seconds, and a verified 31,406,917-byte export. The isolated final run scanned in 265.390 seconds while another emulator was active; an uncontended integration run scanned in 106.367 seconds (33.85x realtime).
+Barebones version 0.1.1 was exercised in-app on an API 35 emulator against the 3,600-second fixture. It found all ten transitions, every timestamp matched the labeled frame PTS exactly, and scanning took 132.745 seconds (27.12x realtime). Prototype 0.2.0 passed the full API 35 fixture gate: ten exact frame-PTS transitions, ten clips totaling 400.000 seconds, and a verified 31,406,917-byte export. The isolated final run scanned in 265.390 seconds while another emulator was active; an uncontended integration run scanned in 106.367 seconds (33.85x realtime). Prototype 0.2.1 ports the v0.17.26 finite-report and confirmed-candidate deduplication delta; those changes are outside the stable sparse-PTS scan path and are covered by the regression/unit gate.
 
 Tester builds use the checked-in `app/test-signing.jks` solely to keep sideloaded GitHub APK upgrades compatible. This public test key must never be reused for a production app. Tags publish `CompilationMaker-Prototype-v<version>.apk` from the `:prototype` module.

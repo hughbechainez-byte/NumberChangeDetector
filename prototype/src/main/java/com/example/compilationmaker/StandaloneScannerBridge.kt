@@ -14,6 +14,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+private fun JSONObject.putFinite(key: String, value: Float, fallback: Float = 0f) {
+    put(key, if (value.isFinite()) value else fallback)
+}
+
 internal data class ScanTransitionSummary(
     val eventBoundaryMs: Long,
     val actualFramePtsMs: Long,
@@ -155,7 +159,7 @@ internal fun standaloneReportJson(
     put("frameProvider", "MediaRetrieverFrameSampler")
     put("frameProviderFallbackReason", JSONObject.NULL)
     put("checkpointIntervalMs", result.profile.checkpointIntervalMs)
-    put("scanSpeedMultiple", result.metrics.videoToWallSpeed.toDouble())
+    putFinite("scanSpeedMultiple", result.metrics.videoToWallSpeed)
     put("experimentalDownscaleSize", 0)
     put("videoDurationMs", result.videoDurationMs)
     put("wallClockScanMs", result.metrics.wallClockMs)
@@ -181,7 +185,7 @@ internal fun standaloneReportJson(
         put("confirmedTransitionCount", result.metrics.confirmedTransitionCount)
         put("acceptedTransitions", result.transitions.size)
         put("rejectedCandidates", rejected)
-        put("throughputVideoToWall", result.metrics.videoToWallSpeed.toDouble())
+        putFinite("throughputVideoToWall", result.metrics.videoToWallSpeed)
         put("scanRate20xGateMet", result.metrics.videoToWallSpeed >= 20f)
         put("scanRate30xGateMet", result.metrics.videoToWallSpeed >= 30f)
     })
@@ -213,22 +217,22 @@ internal fun standaloneReportJson(
                 put("actualFramePtsMs", mark.actualFramePtsMs)
                 put("fromNumber", mark.fromNumber ?: JSONObject.NULL)
                 put("toNumber", mark.toNumber)
-                put("confidence", mark.confidence.toDouble())
+                putFinite("confidence", mark.confidence)
                 put("confirmation", mark.confirmation)
                 put("requestedCutStartMs", (mark.actualFramePtsMs - 10_000L).coerceAtLeast(0L))
                 put("requestedCutEndMs", (mark.actualFramePtsMs + 30_000L).coerceAtMost(result.videoDurationMs))
                 put("candidateReason", "sparse-checkpoint-pts")
-                put("candidatePeakScore", mark.confidence.toDouble())
+                putFinite("candidatePeakScore", mark.confidence)
                 put("evidence", JSONArray().apply { mark.evidence.forEach { put(evidenceJson(it)) } })
             })
         }
     })
     put("scanWindow", JSONObject().apply {
         put("coordinateSpace", "display-upright")
-        put("xPercent", result.roi.xFraction.toDouble())
-        put("yPercent", result.roi.yFraction.toDouble())
-        put("widthPercent", result.roi.widthFraction.toDouble())
-        put("heightPercent", result.roi.heightFraction.toDouble())
+        putFinite("xPercent", result.roi.xFraction)
+        putFinite("yPercent", result.roi.yFraction)
+        putFinite("widthPercent", result.roi.widthFraction)
+        putFinite("heightPercent", result.roi.heightFraction)
     })
     put("warnings", JSONArray(result.warnings))
     put("savedAtMs", savedAtMs)
@@ -241,7 +245,7 @@ internal fun transitionSummariesJson(summaries: List<ScanTransitionSummary>): JS
             put("actualFramePtsMs", summary.actualFramePtsMs)
             put("fromNumber", summary.fromNumber ?: JSONObject.NULL)
             put("toNumber", summary.toNumber)
-            put("confidence", summary.confidence.toDouble())
+            putFinite("confidence", summary.confidence)
             put("confirmation", summary.confirmation)
         })
     }
@@ -259,7 +263,7 @@ private fun evidenceJson(evidence: DigitEvidence): JSONObject = JSONObject().app
     put("actualFramePtsMs", evidence.actualFramePtsMs ?: JSONObject.NULL)
     put("parsedNumber", evidence.parsedNumber ?: JSONObject.NULL)
     put("rawText", evidence.rawText)
-    put("confidence", evidence.confidence.toDouble())
+    putFinite("confidence", evidence.confidence)
     put("branch", evidence.branch)
     put("status", evidence.status.name)
     put("elapsedMs", evidence.elapsedMs)
