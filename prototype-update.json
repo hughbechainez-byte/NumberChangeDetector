@@ -1,11 +1,19 @@
 {
-  "version": "0.2.1",
-  "versionCode": 3,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.2.1/CompilationMaker-Prototype-v0.2.1.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.2.1",
-  "sha256": "535ab6b42e3a815f3fd04268bf907b7045d0b4262a531baf3c4b06f4aab58250",
-  "notes": "CompilationMaker 0.17.26 prototype with the sparse PTS-aware number-change scanner integrated.",
+  "version": "0.3.0",
+  "versionCode": 4,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.0/CompilationMaker-Prototype-v0.3.0.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.0",
+  "sha256": "7a1e8a8770a0df8ee25a69d5bd90712b94821336c5fd30b66fac43c45693e288",
+  "notes": "Background-ready prototype with live PiP percentage/status, concise or core-activity feeds, and bounded active-job wake protection.",
   "updates": [
+    {
+      "version": "0.3.0",
+      "versionCode": 4,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.0/CompilationMaker-Prototype-v0.3.0.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.0",
+      "sha256": "7a1e8a8770a0df8ee25a69d5bd90712b94821336c5fd30b66fac43c45693e288",
+      "notes": "Adds compact auto-enter PiP, live percentage and exact status, optional rapid core telemetry, foreground CPU continuity, and lower progress-publication overhead. Detection and timestamp decisions are unchanged."
+    },
     {
       "version": "0.2.1",
       "versionCode": 3,
