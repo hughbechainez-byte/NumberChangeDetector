@@ -29,7 +29,8 @@ class CornerNumberTransitionDetector(
     ): TransitionDetectionResult {
         val started = android.os.SystemClock.elapsedRealtime()
         val warnings = ArrayList<String>()
-        val cache = HashMap<Long, DigitEvidence>()
+        val coarseCache = HashMap<Long, DigitEvidence>()
+        val exactCache = HashMap<Long, DigitEvidence>()
         var decodedFrames = 0
         val roi = request.roi.normalized()
 
@@ -53,6 +54,7 @@ class CornerNumberTransitionDetector(
                 suspend fun recognizeAt(timeMs: Long, exactPresentationTime: Boolean, aggressive: Boolean): DigitEvidence {
                     currentCoroutineContext().ensureActive()
                     val safeTime = timeMs.coerceIn(0L, metadata.durationMs)
+                    val cache = if (exactPresentationTime) exactCache else coarseCache
                     val cached = cache[safeTime]
                     if (cached != null && (cached.parsedNumber != null || !aggressive)) {
                         emitCore(
@@ -64,9 +66,7 @@ class CornerNumberTransitionDetector(
                                 actualFramePtsMs = cached.actualFramePtsMs
                             )
                         )
-                        return if (exactPresentationTime && cached.actualFramePtsMs == null) {
-                            cached.copy(actualFramePtsMs = safeTime).also { cache[safeTime] = it }
-                        } else cached
+                        return cached
                     }
 
                     emitCore(
@@ -77,10 +77,14 @@ class CornerNumberTransitionDetector(
                             requestedTimeMs = safeTime
                         )
                     )
-                    val frame = sampler.frameAt(safeTime, request.targetFrameWidthPx)
+                    val frame = sampler.frameAt(
+                        safeTime,
+                        request.targetFrameWidthPx,
+                        exactPresentationTime
+                    )
                         ?: return DigitEvidence(
                             requestedTimeMs = safeTime,
-                            actualFramePtsMs = safeTime.takeIf { exactPresentationTime },
+                            actualFramePtsMs = null,
                             parsedNumber = null,
                             rawText = "",
                             confidence = 0f,
@@ -152,7 +156,7 @@ class CornerNumberTransitionDetector(
                                 )
                                 return DigitEvidence(
                                     requestedTimeMs = safeTime,
-                                    actualFramePtsMs = safeTime.takeIf { exactPresentationTime },
+                                    actualFramePtsMs = frame.presentationTimeMs.takeIf { exactPresentationTime },
                                     parsedNumber = recognition.value,
                                     rawText = recognition.rawText.take(80),
                                     confidence = recognition.confidence,
@@ -175,68 +179,209 @@ class CornerNumberTransitionDetector(
                 onProgress(DetectionProgress("preflight", "Opening video and warming bundled OCR", 2))
                 recognizeAt(0L, exactPresentationTime = false, aggressive = true)
 
-                val checkpointTimes = generateCheckpointTimestamps(
-                    metadata.durationMs,
-                    request.profile.checkpointIntervalMs
-                )
-                val coarse = ArrayList<StatePoint>(checkpointTimes.size)
-                checkpointTimes.forEachIndexed { index, timeMs ->
-                    val evidence = recognizeAt(timeMs, exactPresentationTime = false, aggressive = true)
-                    coarse += StatePoint(timeMs, evidence.parsedNumber, evidence)
-                    val percent = 5 + ((index + 1) * 60 / checkpointTimes.size.coerceAtLeast(1))
-                    onProgress(
-                        DetectionProgress(
-                            "coarse_scan",
-                            "Checkpoint ${index + 1}/${checkpointTimes.size} at ${formatTimestampMs(timeMs)}: ${evidence.parsedNumber ?: "none"}",
-                            percent
+                suspend fun sampleCheckpoints(
+                    intervalMs: Long,
+                    progressStart: Int,
+                    progressSpan: Int,
+                    label: String
+                ): List<StatePoint> {
+                    val times = generateCheckpointTimestamps(metadata.durationMs, intervalMs)
+                    return times.mapIndexed { index, timeMs ->
+                        val evidence = recognizeAt(timeMs, exactPresentationTime = false, aggressive = true)
+                        val percent = progressStart +
+                            ((index + 1) * progressSpan / times.size.coerceAtLeast(1))
+                        onProgress(
+                            DetectionProgress(
+                                "coarse_scan",
+                                "$label ${index + 1}/${times.size} at ${formatTimestampMs(timeMs)}: ${evidence.parsedNumber ?: "none"}",
+                                percent.coerceIn(0, 98)
+                            )
                         )
-                    )
-                }
-
-                val smoothed = despikeStatePoints(coarse)
-                val brackets = buildTransitionBrackets(smoothed)
-                if (brackets.any { it.fromNumber != null && it.toNumber != it.fromNumber + 1 }) {
-                    warnings += "One or more coarse states were non-sequential; inspect those rows before integration."
-                }
-
-                val marks = ArrayList<TransitionMark>()
-                brackets.forEachIndexed { index, bracket ->
-                    currentCoroutineContext().ensureActive()
-                    val percent = 65 + ((index + 1) * 33 / brackets.size.coerceAtLeast(1))
-                    onProgress(
-                        DetectionProgress(
-                            "refining",
-                            "Refining ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} (${index + 1}/${brackets.size})",
-                            percent
-                        )
-                    )
-                    val mark = refineBracket(
-                        bracket = bracket,
-                        sampler = sampler,
-                        durationMs = metadata.durationMs,
-                        recognize = ::recognizeAt,
-                        emitCore = ::emitCore,
-                        candidateIndex = index + 1,
-                        candidateCount = brackets.size
-                    )
-                    if (mark == null) {
-                        warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
-                    } else if (marks.none {
-                            it.fromNumber == mark.fromNumber && it.toNumber == mark.toNumber &&
-                                abs(it.eventBoundaryMs - mark.eventBoundaryMs) <= 1_000L
-                        }) {
-                        marks += mark
+                        StatePoint(timeMs, evidence.parsedNumber, evidence)
                     }
+                }
+
+                suspend fun refineAll(
+                    brackets: List<TransitionBracket>,
+                    progressStart: Int,
+                    progressSpan: Int
+                ): Pair<List<TransitionMark>, List<TransitionBracket>> {
+                    val confirmed = ArrayList<TransitionMark>()
+                    val failed = ArrayList<TransitionBracket>()
+                    brackets.forEachIndexed { index, bracket ->
+                        currentCoroutineContext().ensureActive()
+                        val percent = progressStart +
+                            ((index + 1) * progressSpan / brackets.size.coerceAtLeast(1))
+                        onProgress(
+                            DetectionProgress(
+                                "refining",
+                                "Refining ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} (${index + 1}/${brackets.size})",
+                                percent.coerceIn(0, 98)
+                            )
+                        )
+                        val mark = refineBracket(
+                            bracket = bracket,
+                            sampler = sampler,
+                            durationMs = metadata.durationMs,
+                            recognize = ::recognizeAt,
+                            emitCore = ::emitCore,
+                            candidateIndex = index + 1,
+                            candidateCount = brackets.size
+                        )
+                        if (mark == null) {
+                            failed += bracket
+                        } else if (confirmed.none {
+                                it.fromNumber == mark.fromNumber && it.toNumber == mark.toNumber &&
+                                    abs(it.eventBoundaryMs - mark.eventBoundaryMs) <= 1_000L
+                            }) {
+                            confirmed += mark
+                        }
+                    }
+                    return confirmed to failed
+                }
+
+                suspend fun standardFastFallback(reason: String): Triple<List<StatePoint>, List<TransitionBracket>, List<TransitionMark>> {
+                    warnings += "Monotonic turbo fell back to the proven 30-second scan: $reason"
+                    emitCore(
+                        CoreActivityEvent(
+                            CoreActivityStage.MONOTONIC_PLANNING,
+                            "fallback",
+                            reason
+                        )
+                    )
+                    onProgress(DetectionProgress("coarse_scan", "Monotonic safety fallback: $reason", 81))
+                    val fallbackTimeline = despikeStatePoints(
+                        sampleCheckpoints(
+                            ScanProfile.FAST.checkpointIntervalMs,
+                            progressStart = 81,
+                            progressSpan = 9,
+                            label = "Fallback checkpoint"
+                        )
+                    )
+                    val fallbackBrackets = buildTransitionBrackets(fallbackTimeline)
+                    if (fallbackBrackets.any { it.fromNumber != null && it.toNumber != it.fromNumber + 1 }) {
+                        warnings += "One or more fallback coarse states were non-sequential; inspect those rows before integration."
+                    }
+                    val (fallbackMarks, failedFallback) = refineAll(
+                        fallbackBrackets,
+                        progressStart = 91,
+                        progressSpan = 7
+                    )
+                    failedFallback.forEach { bracket ->
+                        warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
+                    }
+                    return Triple(fallbackTimeline, fallbackBrackets, fallbackMarks)
+                }
+
+                val finalTimeline: List<StatePoint>
+                val finalBrackets: List<TransitionBracket>
+                val marks: List<TransitionMark>
+
+                if (request.profile == ScanProfile.MONOTONIC_3_MIN) {
+                    val macroTimeline = sampleCheckpoints(
+                        request.profile.checkpointIntervalMs,
+                        progressStart = 5,
+                        progressSpan = 40,
+                        label = "Monotonic checkpoint"
+                    )
+                    var adaptiveProbeOrdinal = 0
+                    val plan = planMonotonicTimeline(macroTimeline) { timeMs ->
+                        adaptiveProbeOrdinal++
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.MONOTONIC_PLANNING,
+                                "probe",
+                                "adaptive probe $adaptiveProbeOrdinal at ${formatTimestampMs(timeMs)}",
+                                requestedTimeMs = timeMs
+                            )
+                        )
+                        onProgress(
+                            DetectionProgress(
+                                "coarse_scan",
+                                "Adaptive monotonic probe $adaptiveProbeOrdinal at ${formatTimestampMs(timeMs)}",
+                                (45 + adaptiveProbeOrdinal.coerceAtMost(14)).coerceAtMost(59)
+                            )
+                        )
+                        val evidence = recognizeAt(timeMs, exactPresentationTime = false, aggressive = true)
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.MONOTONIC_PLANNING,
+                                "observed",
+                                "adaptive probe $adaptiveProbeOrdinal value=${evidence.parsedNumber ?: "none"}",
+                                requestedTimeMs = timeMs
+                            )
+                        )
+                        StatePoint(timeMs, evidence.parsedNumber, evidence)
+                    }
+
+                    when (plan) {
+                        is MonotonicTimelinePlan.Fallback -> {
+                            val fallback = standardFastFallback(plan.reason)
+                            finalTimeline = fallback.first
+                            finalBrackets = fallback.second
+                            marks = fallback.third
+                        }
+                        is MonotonicTimelinePlan.Success -> {
+                            val monotonicTimeline = plan.points
+                            val monotonicBrackets = buildTransitionBrackets(monotonicTimeline)
+                            val (monotonicMarks, failedMonotonic) = refineAll(
+                                monotonicBrackets,
+                                progressStart = 60,
+                                progressSpan = 20
+                            )
+                            val violation = failedMonotonic.firstOrNull()?.let { bracket ->
+                                "persistent refinement failed for ${bracket.fromNumber ?: "none"}->${bracket.toNumber}"
+                            } ?: monotonicRefinementViolation(monotonicBrackets, monotonicMarks)
+                            if (violation != null) {
+                                val fallback = standardFastFallback(violation)
+                                finalTimeline = fallback.first
+                                finalBrackets = fallback.second
+                                marks = fallback.third
+                            } else {
+                                emitCore(
+                                    CoreActivityEvent(
+                                        CoreActivityStage.MONOTONIC_PLANNING,
+                                        "accepted",
+                                        "${plan.adaptiveProbeCount} adaptive probes confirmed ${monotonicMarks.size} transitions"
+                                    )
+                                )
+                                finalTimeline = monotonicTimeline
+                                finalBrackets = monotonicBrackets
+                                marks = monotonicMarks
+                            }
+                        }
+                    }
+                } else {
+                    val coarse = sampleCheckpoints(
+                        request.profile.checkpointIntervalMs,
+                        progressStart = 5,
+                        progressSpan = 60,
+                        label = "Checkpoint"
+                    )
+                    finalTimeline = despikeStatePoints(coarse)
+                    finalBrackets = buildTransitionBrackets(finalTimeline)
+                    if (finalBrackets.any { it.fromNumber != null && it.toNumber != it.fromNumber + 1 }) {
+                        warnings += "One or more coarse states were non-sequential; inspect those rows before integration."
+                    }
+                    val (standardMarks, failedStandard) = refineAll(
+                        finalBrackets,
+                        progressStart = 65,
+                        progressSpan = 33
+                    )
+                    failedStandard.forEach { bracket ->
+                        warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
+                    }
+                    marks = standardMarks
                 }
 
                 val wallMs = android.os.SystemClock.elapsedRealtime() - started
                 val metrics = ScanMetrics(
                     scannerVersion = SCANNER_VERSION,
                     wallClockMs = wallMs,
-                    checkpointCount = checkpointTimes.size,
+                    checkpointCount = finalTimeline.size,
                     decodedFrameCount = decodedFrames,
                     ocrInferenceCount = recognizer.inferenceCount,
-                    candidateCount = brackets.size,
+                    candidateCount = finalBrackets.size,
                     confirmedTransitionCount = marks.size,
                     videoToWallSpeed = if (wallMs > 0L) metadata.durationMs.toFloat() / wallMs else 0f
                 )
@@ -247,7 +392,7 @@ class CornerNumberTransitionDetector(
                     roi = roi,
                     profile = request.profile,
                     transitions = marks.sortedBy { it.eventBoundaryMs },
-                    checkpoints = smoothed,
+                    checkpoints = finalTimeline,
                     metrics = metrics,
                     warnings = warnings
                 )
@@ -272,8 +417,14 @@ class CornerNumberTransitionDetector(
                 requestedTimeMs = bracket.startMs
             )
         )
-        var sampleTimes = sampler.presentationTimesBetween(bracket.startMs, bracket.endMs)
-            .filter { it in bracket.startMs..bracket.endMs }
+        val enumerationEndMs = if (bracket.startMs == bracket.endMs) {
+            (bracket.endMs + FIRST_STATE_CONFIRMATION_WINDOW_MS)
+                .coerceAtMost(durationMs)
+        } else {
+            bracket.endMs
+        }
+        var sampleTimes = sampler.presentationTimesBetween(bracket.startMs, enumerationEndMs)
+            .filter { it in bracket.startMs..enumerationEndMs }
             .distinct()
             .sorted()
         emitCore(
@@ -296,6 +447,7 @@ class CornerNumberTransitionDetector(
             )
         }
         if (sampleTimes.isEmpty()) return null
+        if (!hasIndependentBoundaryConfirmationSamples(bracket, sampleTimes.size)) return null
 
         val observed = LinkedHashMap<Long, DigitEvidence>()
         suspend fun valueAt(index: Int): Int? {
@@ -361,6 +513,9 @@ class CornerNumberTransitionDetector(
         } ?: return null
 
         val boundaryMs = sampleTimes[boundaryIndex]
+        if (boundaryMs !in bracket.startMs..bracket.endMs) return null
+        val actualBoundaryPtsMs = observed[boundaryMs]?.actualFramePtsMs ?: return null
+        if (actualBoundaryPtsMs !in bracket.startMs..bracket.endMs) return null
         emitCore(
             CoreActivityEvent(
                 CoreActivityStage.PTS_CONFIRMATION,
@@ -382,8 +537,8 @@ class CornerNumberTransitionDetector(
             .sortedBy { it.requestedTimeMs }
 
         return TransitionMark(
-            eventBoundaryMs = boundaryMs,
-            actualFramePtsMs = boundaryMs,
+            eventBoundaryMs = actualBoundaryPtsMs,
+            actualFramePtsMs = actualBoundaryPtsMs,
             fromNumber = bracket.fromNumber,
             toNumber = bracket.toNumber,
             confidence = confidence,
@@ -435,5 +590,6 @@ class CornerNumberTransitionDetector(
         const val SCANNER_VERSION = "v1-sparse-pts-ocr"
         const val MIN_OCR_SIDE = 192
         const val MAX_OCR_SIDE = 512
+        const val FIRST_STATE_CONFIRMATION_WINDOW_MS = 1_000L
     }
 }

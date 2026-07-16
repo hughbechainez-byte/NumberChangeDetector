@@ -15,21 +15,27 @@ class CheckpointProfilesTest {
         assertEquals(
             listOf(
                 "Prototype Fast PTS (30s)",
+                "Monotonic Turbo PTS (3m adaptive, persistent 1→N)",
                 "Prototype Balanced PTS (10s)",
                 "Prototype Precise PTS (3s)",
                 "Legacy Experimental (125ms)"
             ),
             profiles.map { it.label }
         )
-        assertEquals(listOf(30_000L, 10_000L, 3_000L, 125L), profiles.map { it.frameStepMs })
+        assertEquals(listOf(30_000L, 180_000L, 10_000L, 3_000L, 125L), profiles.map { it.frameStepMs })
         assertEquals(
             listOf(
+                ScanMode.StableCheckpoint,
                 ScanMode.StableCheckpoint,
                 ScanMode.StableCheckpoint,
                 ScanMode.StableCheckpoint,
                 ScanMode.Experimental
             ),
             profiles.map { it.mode }
+        )
+        assertEquals(
+            listOf("FAST", "MONOTONIC_3_MIN", "BALANCED", "PRECISE", null),
+            profiles.map { it.scannerProfileId }
         )
     }
 

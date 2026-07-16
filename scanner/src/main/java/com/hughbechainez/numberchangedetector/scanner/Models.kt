@@ -30,6 +30,7 @@ enum class CornerPreset(val label: String, val window: ScanWindow) {
 
 enum class ScanProfile(val label: String, val checkpointIntervalMs: Long) {
     FAST("Fast - 30 second skim", 30_000L),
+    MONOTONIC_3_MIN("Monotonic turbo - adaptive 3 minute skim", 180_000L),
     BALANCED("Balanced - 10 second skim", 10_000L),
     PRECISE("Precise - 3 second skim", 3_000L)
 }
@@ -133,6 +134,7 @@ enum class CoreActivityStage {
     FRAME_FETCH,
     PREPROCESS,
     OCR,
+    MONOTONIC_PLANNING,
     PTS_ENUMERATION,
     BINARY_SEARCH,
     PTS_CONFIRMATION
@@ -158,7 +160,11 @@ data class FrameSample(
 
 interface FrameSampler : AutoCloseable {
     val metadata: SourceVideoMetadata
-    suspend fun frameAt(timeMs: Long, targetWidthPx: Int): FrameSample?
+    suspend fun frameAt(
+        timeMs: Long,
+        targetWidthPx: Int,
+        exactPresentationTime: Boolean = false
+    ): FrameSample?
     fun presentationTimesBetween(startMs: Long, endMs: Long): List<Long>
 }
 
@@ -251,6 +257,180 @@ internal suspend fun findFirstPersistentTargetIndex(
         for (next in (index + 1)..confirmationEnd) {
             if (valueAt(next) == targetNumber) return index
         }
+    }
+    return null
+}
+
+internal fun hasIndependentBoundaryConfirmationSamples(
+    bracket: TransitionBracket,
+    sampleCount: Int
+): Boolean = bracket.startMs != bracket.endMs || sampleCount >= 2
+
+internal sealed interface MonotonicTimelinePlan {
+    val adaptiveProbeCount: Int
+
+    data class Success(
+        val points: List<StatePoint>,
+        override val adaptiveProbeCount: Int
+    ) : MonotonicTimelinePlan
+
+    data class Fallback(
+        val reason: String,
+        override val adaptiveProbeCount: Int
+    ) : MonotonicTimelinePlan
+}
+
+/**
+ * Expands sparse monotonic checkpoints only when two observed endpoints skip one or more
+ * numeric states. Every returned state was directly observed; missing numbers are never
+ * synthesized from arithmetic.
+ */
+internal suspend fun planMonotonicTimeline(
+    checkpoints: List<StatePoint>,
+    minProbeSpacingMs: Long = 250L,
+    maxAdaptiveProbes: Int = 128,
+    maxIntervalJump: Int = 32,
+    probe: suspend (Long) -> StatePoint
+): MonotonicTimelinePlan {
+    if (checkpoints.isEmpty()) return MonotonicTimelinePlan.Fallback("no coarse checkpoints", 0)
+    val ordered = checkpoints.sortedBy(StatePoint::timeMs)
+    if (ordered.zipWithNext().any { (left, right) -> left.timeMs >= right.timeMs }) {
+        return MonotonicTimelinePlan.Fallback("checkpoint times were not strictly increasing", 0)
+    }
+    if (minProbeSpacingMs <= 0L || maxAdaptiveProbes < 0 || maxIntervalJump < 1) {
+        return MonotonicTimelinePlan.Fallback("invalid monotonic planning limits", 0)
+    }
+
+    val observed = linkedMapOf<Long, StatePoint>()
+    ordered.forEach { observed[it.timeMs] = it }
+    var adaptiveProbes = 0
+    var failure: String? = null
+
+    fun validNumber(value: Int?): Boolean = value == null || value > 0
+    fun rank(value: Int?): Int = value ?: 0
+
+    suspend fun resolve(left: StatePoint, right: StatePoint) {
+        if (failure != null) return
+        if (!validNumber(left.value) || !validNumber(right.value)) {
+            failure = "monotonic states must be null or positive integers"
+            return
+        }
+        if (left.value != null && right.value == null) {
+            failure = "counter returned to no-number after counting started"
+            return
+        }
+        val leftRank = rank(left.value)
+        val rightRank = rank(right.value)
+        if (rightRank < leftRank) {
+            failure = "counter decreased or reset from $leftRank to $rightRank"
+            return
+        }
+        val jump = rightRank - leftRank
+        if (jump <= 1) return
+        if (jump > maxIntervalJump) {
+            failure = "counter jump $leftRank->$rightRank exceeded the safety limit"
+            return
+        }
+        val spanMs = right.timeMs - left.timeMs
+        if (spanMs <= minProbeSpacingMs) {
+            failure = "counter jump $leftRank->$rightRank remained unresolved within ${minProbeSpacingMs}ms"
+            return
+        }
+        if (adaptiveProbes >= maxAdaptiveProbes) {
+            failure = "adaptive probe budget was exhausted"
+            return
+        }
+        val midpointMs = left.timeMs + spanMs / 2L
+        if (midpointMs <= left.timeMs || midpointMs >= right.timeMs) {
+            failure = "adaptive midpoint could not split the interval"
+            return
+        }
+
+        val midpoint = probe(midpointMs)
+        adaptiveProbes++
+        if (midpoint.timeMs != midpointMs) {
+            failure = "adaptive probe returned the wrong timestamp"
+            return
+        }
+        if (!validNumber(midpoint.value)) {
+            failure = "adaptive probe returned a non-positive number"
+            return
+        }
+        val middleRank = rank(midpoint.value)
+        if (middleRank !in leftRank..rightRank || (left.value != null && midpoint.value == null)) {
+            failure = "adaptive probe violated monotonic endpoint bounds"
+            return
+        }
+        observed[midpointMs] = midpoint
+        resolve(left, midpoint)
+        resolve(midpoint, right)
+    }
+
+    ordered.zipWithNext().forEach { (left, right) -> resolve(left, right) }
+    failure?.let { return MonotonicTimelinePlan.Fallback(it, adaptiveProbes) }
+
+    val expanded = observed.values.sortedBy(StatePoint::timeMs)
+    if (expanded.none { it.value != null }) {
+        return MonotonicTimelinePlan.Fallback("no numeric counter state was observed", adaptiveProbes)
+    }
+    monotonicTimelineViolation(expanded)?.let {
+        return MonotonicTimelinePlan.Fallback(it, adaptiveProbes)
+    }
+    return MonotonicTimelinePlan.Success(expanded, adaptiveProbes)
+}
+
+internal fun monotonicTimelineViolation(points: List<StatePoint>): String? {
+    if (points.isEmpty()) return "monotonic timeline was empty"
+    if (points.zipWithNext().any { (left, right) -> left.timeMs >= right.timeMs }) {
+        return "monotonic timeline timestamps were not strictly increasing"
+    }
+    var countingStarted = false
+    var previousNumber = 0
+    for (point in points) {
+        val value = point.value
+        if (value == null) {
+            if (countingStarted) return "counter returned to no-number after counting started"
+            continue
+        }
+        if (value <= 0) return "monotonic states must be positive integers"
+        if (!countingStarted) {
+            if (value != 1) return "first observed counter value was $value instead of 1"
+            countingStarted = true
+            previousNumber = value
+            continue
+        }
+        if (value < previousNumber) return "counter decreased or reset from $previousNumber to $value"
+        if (value > previousNumber + 1) return "counter skipped $previousNumber->${value}"
+        previousNumber = value
+    }
+    return null
+}
+
+internal fun monotonicRefinementViolation(
+    brackets: List<TransitionBracket>,
+    marks: List<TransitionMark>
+): String? {
+    if (marks.size != brackets.size) {
+        return "confirmed ${marks.size} of ${brackets.size} expected monotonic transitions"
+    }
+    var previousBoundaryMs = -1L
+    brackets.zip(marks).forEach { (bracket, mark) ->
+        if (bracket.fromNumber != mark.fromNumber || bracket.toNumber != mark.toNumber) {
+            return "refined transition did not match its monotonic bracket"
+        }
+        val sequential = if (bracket.fromNumber == null) {
+            bracket.toNumber == 1
+        } else {
+            bracket.toNumber == bracket.fromNumber + 1
+        }
+        if (!sequential) return "monotonic bracket was not an adjacent transition"
+        if (mark.actualFramePtsMs !in bracket.startMs..bracket.endMs) {
+            return "refined presentation timestamp escaped its monotonic bracket"
+        }
+        if (mark.eventBoundaryMs <= previousBoundaryMs) {
+            return "refined monotonic boundaries were not strictly increasing"
+        }
+        previousBoundaryMs = mark.eventBoundaryMs
     }
     return null
 }

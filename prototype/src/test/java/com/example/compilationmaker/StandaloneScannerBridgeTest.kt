@@ -21,6 +21,8 @@ class StandaloneScannerBridgeTest {
         assertEquals(ScanProfile.BALANCED, standaloneProfileFor(10_000L))
         assertEquals(ScanProfile.FAST, standaloneProfileFor(30_000L))
         assertEquals(ScanProfile.FAST, standaloneProfileFor(60_000L))
+        assertEquals(ScanProfile.FAST, standaloneProfileFor(180_000L))
+        assertEquals(ScanProfile.MONOTONIC_3_MIN, standaloneProfileFor(180_000L, "MONOTONIC_3_MIN"))
     }
 
     @Test
@@ -46,6 +48,8 @@ class StandaloneScannerBridgeTest {
         assertEquals(2, mapped.candidateCount)
         assertEquals(0, mapped.rejectedTransitionCount)
         assertEquals(121, mapped.completedCheckpointCount)
+        assertEquals(false, mapped.strategyFallbackUsed)
+        assertNull(mapped.strategyFallbackReason)
         assertEquals(
             listOf(SegmentWindow(20_000L, 60_000L), SegmentWindow(65_000L, 105_000L)),
             mapped.segments
@@ -74,11 +78,33 @@ class StandaloneScannerBridgeTest {
         assertEquals(75_000L, summaries.getJSONObject(1).getLong("actualFramePtsMs"))
     }
 
-    private fun fixtureResult(): TransitionDetectionResult = TransitionDetectionResult(
+    @Test
+    fun monotonicFallbackIsPersistedInBridgeResultAndReport() {
+        val reason = "Monotonic turbo fell back to the proven 30-second scan: skipped state"
+        val result = fixtureResult(
+            warnings = listOf(reason),
+            profile = ScanProfile.MONOTONIC_3_MIN
+        )
+        val mapped = mapStandaloneResult(result)
+        val report = standaloneReportJson(result, mapped, savedAtMs = 123L)
+
+        assertTrue(mapped.strategyFallbackUsed)
+        assertEquals(reason, mapped.strategyFallbackReason)
+        assertTrue(report.getBoolean("fallbackUsed"))
+        assertEquals(reason, report.getString("failureReason"))
+        assertEquals("Prototype Fast PTS (30s)", report.getString("effectiveProfileLabel"))
+        assertEquals(180_000L, report.getLong("requestedCheckpointIntervalMs"))
+        assertEquals(30_000L, report.getLong("effectiveCheckpointIntervalMs"))
+    }
+
+    private fun fixtureResult(
+        warnings: List<String> = emptyList(),
+        profile: ScanProfile = ScanProfile.FAST
+    ): TransitionDetectionResult = TransitionDetectionResult(
         sourceUri = "content://fixture/video-a",
         videoDurationMs = 180_000L,
         roi = ScanWindow(0f, 0.8f, 0.1f, 0.2f),
-        profile = ScanProfile.FAST,
+        profile = profile,
         transitions = listOf(
             TransitionMark(
                 eventBoundaryMs = 30_000L,
@@ -108,6 +134,6 @@ class StandaloneScannerBridgeTest {
             confirmedTransitionCount = 2,
             videoToWallSpeed = 180f
         ),
-        warnings = emptyList()
+        warnings = warnings
     )
 }

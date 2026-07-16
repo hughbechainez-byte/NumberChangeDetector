@@ -36,6 +36,8 @@ internal data class StandaloneScanBridgeResult(
     val candidateTimestampsMs: List<Long>,
     val rejectedTransitionCount: Int,
     val completedCheckpointCount: Int,
+    val strategyFallbackUsed: Boolean,
+    val strategyFallbackReason: String?,
     val transitionSummaries: List<ScanTransitionSummary>
 )
 
@@ -54,6 +56,7 @@ internal class StandaloneScannerBridge(private val context: Context) {
         sourceUri: Uri,
         scanWindow: ScanWindow,
         requestedIntervalMs: Long,
+        requestedProfileId: String?,
         progress: (CompilationPipelineState, String, Int) -> Unit,
         coreActivity: (CoreActivityEvent) -> Unit = {}
     ): StandaloneScanBridgeResult {
@@ -66,7 +69,7 @@ internal class StandaloneScannerBridge(private val context: Context) {
                     widthFraction = scanWindow.widthPercent,
                     heightFraction = scanWindow.heightPercent
                 ),
-                profile = standaloneProfileFor(requestedIntervalMs),
+                profile = standaloneProfileFor(requestedIntervalMs, requestedProfileId),
                 targetFrameWidthPx = 640
             ),
             onProgress = { detectorProgress ->
@@ -81,7 +84,12 @@ internal class StandaloneScannerBridge(private val context: Context) {
     }
 }
 
-internal fun standaloneProfileFor(requestedIntervalMs: Long): DetectorScanProfile = when {
+internal fun standaloneProfileFor(
+    requestedIntervalMs: Long,
+    requestedProfileId: String? = null
+): DetectorScanProfile = requestedProfileId
+    ?.let { profileId -> runCatching { DetectorScanProfile.valueOf(profileId) }.getOrNull() }
+    ?: when {
     // Preserve the prototype's explicit fast/accurate compatibility choices.
     requestedIntervalMs == 500L -> DetectorScanProfile.FAST
     requestedIntervalMs == 250L -> DetectorScanProfile.PRECISE
@@ -92,6 +100,7 @@ internal fun standaloneProfileFor(requestedIntervalMs: Long): DetectorScanProfil
 
 internal fun prototypeProfileLabel(profile: DetectorScanProfile): String = when (profile) {
     DetectorScanProfile.FAST -> "Prototype Fast PTS (30s)"
+    DetectorScanProfile.MONOTONIC_3_MIN -> "Monotonic Turbo PTS (3m adaptive, persistent 1→N)"
     DetectorScanProfile.BALANCED -> "Prototype Balanced PTS (10s)"
     DetectorScanProfile.PRECISE -> "Prototype Precise PTS (3s)"
 }
@@ -123,6 +132,9 @@ internal fun mapStandaloneResult(result: TransitionDetectionResult): StandaloneS
         )
     }
     val candidateCount = maxOf(result.metrics.candidateCount, transitions.size)
+    val strategyFallbackReason = result.warnings.firstOrNull {
+        it.startsWith(MONOTONIC_FALLBACK_WARNING_PREFIX)
+    }
     return StandaloneScanBridgeResult(
         segments = planExactTransitionSegments(timestamps, result.videoDurationMs),
         videoDurationMs = result.videoDurationMs,
@@ -131,6 +143,8 @@ internal fun mapStandaloneResult(result: TransitionDetectionResult): StandaloneS
         candidateTimestampsMs = timestamps,
         rejectedTransitionCount = (candidateCount - transitions.size).coerceAtLeast(0),
         completedCheckpointCount = result.metrics.checkpointCount,
+        strategyFallbackUsed = strategyFallbackReason != null,
+        strategyFallbackReason = strategyFallbackReason,
         transitionSummaries = summaries
     )
 }
@@ -156,13 +170,18 @@ internal fun standaloneReportJson(
     savedAtMs: Long
 ): JSONObject = JSONObject().apply {
     val rejected = plan.rejectedTransitionCount
+    val effectiveProfile = if (plan.strategyFallbackUsed) DetectorScanProfile.FAST else result.profile
     put("schemaVersion", result.schemaVersion)
     put("sourceUri", result.sourceUri)
     put("profileLabel", prototypeProfileLabel(result.profile))
+    put("requestedProfileLabel", prototypeProfileLabel(result.profile))
+    put("effectiveProfileLabel", prototypeProfileLabel(effectiveProfile))
     put("scannerMode", ScanMode.StableCheckpoint.name)
     put("frameProvider", "MediaRetrieverFrameSampler")
     put("frameProviderFallbackReason", JSONObject.NULL)
-    put("checkpointIntervalMs", result.profile.checkpointIntervalMs)
+    put("checkpointIntervalMs", effectiveProfile.checkpointIntervalMs)
+    put("requestedCheckpointIntervalMs", result.profile.checkpointIntervalMs)
+    put("effectiveCheckpointIntervalMs", effectiveProfile.checkpointIntervalMs)
     putFinite("scanSpeedMultiple", result.metrics.videoToWallSpeed)
     put("experimentalDownscaleSize", 0)
     put("videoDurationMs", result.videoDurationMs)
@@ -171,10 +190,10 @@ internal fun standaloneReportJson(
     put("coarseSampleCount", result.metrics.checkpointCount)
     put("acceptedTransitions", result.transitions.size)
     put("rejectedCandidates", rejected)
-    put("fallbackUsed", false)
-    put("failureReason", JSONObject.NULL)
+    put("fallbackUsed", plan.strategyFallbackUsed)
+    put("failureReason", plan.strategyFallbackReason ?: JSONObject.NULL)
     put("ocrCallCount", result.metrics.ocrInferenceCount)
-    put("frameStepMs", result.profile.checkpointIntervalMs)
+    put("frameStepMs", effectiveProfile.checkpointIntervalMs)
     put("candidatesFound", result.metrics.candidateCount)
     put("mode", ScanMode.StableCheckpoint.name)
     put("durationMs", result.videoDurationMs)
@@ -241,6 +260,9 @@ internal fun standaloneReportJson(
     put("warnings", JSONArray(result.warnings))
     put("savedAtMs", savedAtMs)
 }
+
+private const val MONOTONIC_FALLBACK_WARNING_PREFIX =
+    "Monotonic turbo fell back to the proven 30-second scan:"
 
 internal fun transitionSummariesJson(summaries: List<ScanTransitionSummary>): JSONArray = JSONArray().apply {
     summaries.forEach { summary ->

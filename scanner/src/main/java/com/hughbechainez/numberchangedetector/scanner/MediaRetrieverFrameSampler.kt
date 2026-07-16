@@ -16,6 +16,7 @@ class MediaRetrieverFrameSampler(
     context: Context,
     private val sourceUri: Uri
 ) : FrameSampler {
+    private val enumeratedPresentationTimesMs = HashSet<Long>()
     private val appContext = context.applicationContext
     private val retriever = MediaMetadataRetriever().apply {
         setDataSource(appContext, sourceUri)
@@ -35,8 +36,15 @@ class MediaRetrieverFrameSampler(
         } else null
     )
 
-    override suspend fun frameAt(timeMs: Long, targetWidthPx: Int): FrameSample? = withContext(Dispatchers.IO) {
+    override suspend fun frameAt(
+        timeMs: Long,
+        targetWidthPx: Int,
+        exactPresentationTime: Boolean
+    ): FrameSample? = withContext(Dispatchers.IO) {
         val safeTimeMs = timeMs.coerceIn(0L, metadata.durationMs)
+        if (exactPresentationTime && safeTimeMs !in enumeratedPresentationTimesMs) {
+            return@withContext null
+        }
         val sourceWidth = metadata.encodedWidth.coerceAtLeast(1)
         val sourceHeight = metadata.encodedHeight.coerceAtLeast(1)
         val width = targetWidthPx.coerceAtLeast(64)
@@ -56,7 +64,11 @@ class MediaRetrieverFrameSampler(
 
         val upright = rotate(raw, metadata.rotationDegrees)
         if (upright !== raw) raw.recycle()
-        FrameSample(safeTimeMs, safeTimeMs, upright)
+        FrameSample(
+            requestedTimeMs = safeTimeMs,
+            presentationTimeMs = safeTimeMs.takeIf { exactPresentationTime },
+            bitmap = upright
+        )
     }
 
     override fun presentationTimesBetween(startMs: Long, endMs: Long): List<Long> {
@@ -79,7 +91,7 @@ class MediaRetrieverFrameSampler(
                 inspected++
                 if (!extractor.advance()) break
             }
-            result.distinct()
+            result.distinct().also { enumeratedPresentationTimesMs.addAll(it) }
         } finally {
             extractor.release()
         }

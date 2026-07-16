@@ -42,7 +42,8 @@ class CompilationWorker(
         val formatOrdinal = inputData.getInt(KEY_FORMAT_ORDINAL, ExportFormat.Mp4.ordinal)
         val transitionOrdinal = inputData.getInt(KEY_TRANSITION_STYLE_ORDINAL, TransitionStyle.Instant.ordinal)
         val scanModeOrdinal = inputData.getInt(KEY_SCAN_MODE, ScanMode.StableCheckpoint.ordinal)
-        val checkpointIntervalMs = inputData.getLong(KEY_CHECKPOINT_INTERVAL_MS, 180_000L)
+        val checkpointIntervalMs = inputData.getLong(KEY_CHECKPOINT_INTERVAL_MS, 30_000L)
+        val scannerProfileId = inputData.getString(KEY_SCANNER_PROFILE_ID)
         val downscaleSize = inputData.getInt(KEY_EXPERIMENTAL_DOWNSCALE, 32)
         val rotation = inputData.getInt(KEY_VIDEO_ROTATION, 0)
         val scanWindowRaw = inputData.getString(KEY_SCAN_WINDOW)
@@ -108,6 +109,7 @@ class CompilationWorker(
                 scanMode = scanMode,
                 scanWindow = scanWindow,
                 scanIntervalMs = checkpointIntervalMs,
+                scannerProfileId = scannerProfileId,
                 rotation = rotation,
                 downscaleSize = downscaleSize,
                 transitionStyle = transitionStyle
@@ -131,6 +133,7 @@ class CompilationWorker(
                     scanMode = ScanMode.StableCheckpoint,
                     scanWindow = scanWindow,
                     scanIntervalMs = checkpointIntervalMs,
+                    scannerProfileId = null,
                     rotation = rotation,
                     downscaleSize = downscaleSize,
                     transitionStyle = transitionStyle
@@ -144,6 +147,14 @@ class CompilationWorker(
 
             if (!scanResult.success) {
                 throw scanResult.failure ?: IllegalStateException(scanResult.failureReason ?: "Scan failed")
+            }
+
+            if (scanResult.strategyFallbackUsed) {
+                fallbackUsed = true
+                failureReason = listOfNotNull(
+                    failureReason?.takeIf { it.isNotBlank() },
+                    scanResult.strategyFallbackReason?.takeIf { it.isNotBlank() }
+                ).distinct().joinToString("; ").ifBlank { "The requested scan strategy used its safe fallback" }
             }
 
             val provisionalPreview =
@@ -378,6 +389,7 @@ class CompilationWorker(
         scanMode: ScanMode,
         scanWindow: ScanWindow,
         scanIntervalMs: Long,
+        scannerProfileId: String?,
         rotation: Int,
         downscaleSize: Int,
         transitionStyle: TransitionStyle,
@@ -389,6 +401,7 @@ class CompilationWorker(
                     sourceUri = sourceUri,
                     scanWindow = scanWindow,
                     requestedIntervalMs = scanIntervalMs,
+                    requestedProfileId = scannerProfileId,
                     progress = progress,
                     coreActivity = { event -> CoreActivityTelemetry.emit(id.toString(), event) }
                 )
@@ -405,6 +418,8 @@ class CompilationWorker(
                     provisionalTransitionCount = 0,
                     rejectedTransitionCount = result.rejectedTransitionCount,
                     completedCheckpointCount = result.completedCheckpointCount,
+                    strategyFallbackUsed = result.strategyFallbackUsed,
+                    strategyFallbackReason = result.strategyFallbackReason,
                     recursiveProbeCount = 0,
                     semanticLeafCount = result.candidateCount,
                     previewClassification = if (result.transitionSummaries.isEmpty()) {
@@ -682,6 +697,8 @@ class CompilationWorker(
         val provisionalTransitionCount: Int = 0,
         val rejectedTransitionCount: Int = 0,
         val completedCheckpointCount: Int = 0,
+        val strategyFallbackUsed: Boolean = false,
+        val strategyFallbackReason: String? = null,
         val recursiveProbeCount: Int = 0,
         val semanticLeafCount: Int = 0,
         val previewClassification: CompilationPreviewClassification = CompilationPreviewClassification.NONE,
@@ -693,6 +710,7 @@ class CompilationWorker(
         const val KEY_SCAN_WINDOW = "scanWindow"
         const val KEY_SCAN_MODE = "scanMode"
         const val KEY_CHECKPOINT_INTERVAL_MS = "checkpointIntervalMs"
+        const val KEY_SCANNER_PROFILE_ID = "scannerProfileId"
         const val KEY_EXPERIMENTAL_DOWNSCALE = "experimentalDownscale"
         const val KEY_QUALITY_ORDINAL = "qualityOrdinal"
         const val KEY_FORMAT_ORDINAL = "formatOrdinal"

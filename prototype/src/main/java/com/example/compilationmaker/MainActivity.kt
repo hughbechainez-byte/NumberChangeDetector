@@ -851,6 +851,7 @@ class MainActivity : AppCompatActivity() {
             .putString(CompilationWorker.KEY_SCAN_WINDOW, scanWindowJson)
             .putInt(CompilationWorker.KEY_SCAN_MODE, requestedScanMode.ordinal)
             .putLong(CompilationWorker.KEY_CHECKPOINT_INTERVAL_MS, scanProfile.frameStepMs)
+            .putString(CompilationWorker.KEY_SCANNER_PROFILE_ID, scanProfile.scannerProfileId)
             .putInt(CompilationWorker.KEY_EXPERIMENTAL_DOWNSCALE, selectedExperimentalDownscaleSize())
             .putInt(CompilationWorker.KEY_QUALITY_ORDINAL, quality.ordinal)
             .putInt(CompilationWorker.KEY_FORMAT_ORDINAL, format.ordinal)
@@ -5944,12 +5945,18 @@ private data class FrameProviderSelection(
 
 data class SegmentWindow(val startMs: Long, val endMs: Long)
 data class ScanWindow(val xPercent: Float, val yPercent: Float, val widthPercent: Float, val heightPercent: Float)
-internal data class ScanProfile(val label: String, val frameStepMs: Long, val mode: ScanMode)
+internal data class ScanProfile(
+    val label: String,
+    val frameStepMs: Long,
+    val mode: ScanMode,
+    val scannerProfileId: String? = null
+)
 
 internal fun compilationScanProfiles(): Array<ScanProfile> = arrayOf(
-    ScanProfile("Prototype Fast PTS (30s)", 30_000L, ScanMode.StableCheckpoint),
-    ScanProfile("Prototype Balanced PTS (10s)", 10_000L, ScanMode.StableCheckpoint),
-    ScanProfile("Prototype Precise PTS (3s)", 3_000L, ScanMode.StableCheckpoint),
+    ScanProfile("Prototype Fast PTS (30s)", 30_000L, ScanMode.StableCheckpoint, "FAST"),
+    ScanProfile("Monotonic Turbo PTS (3m adaptive, persistent 1→N)", 180_000L, ScanMode.StableCheckpoint, "MONOTONIC_3_MIN"),
+    ScanProfile("Prototype Balanced PTS (10s)", 10_000L, ScanMode.StableCheckpoint, "BALANCED"),
+    ScanProfile("Prototype Precise PTS (3s)", 3_000L, ScanMode.StableCheckpoint, "PRECISE"),
     ScanProfile("Legacy Experimental (125ms)", 125L, ScanMode.Experimental)
 )
 
