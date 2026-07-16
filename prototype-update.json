@@ -1,11 +1,19 @@
 {
-  "version": "0.3.1",
-  "versionCode": 5,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.1/CompilationMaker-Prototype-v0.3.1.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.1",
-  "sha256": "76a9c82b09599fa9327fe3d6da3bc48f34d030777f90ff0f3333df3469b376a8",
-  "notes": "Verified periodic update checks, optional automatic APK download with Android install approval, and policy-equivalent lazy boundary confirmation.",
+  "version": "0.4.0",
+  "versionCode": 6,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.4.0/CompilationMaker-Prototype-v0.4.0.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.4.0",
+  "sha256": "a75f7bfb517c3499a3a8e873b23842e2b9c29b49df63511dc70e2f932ef62059",
+  "notes": "Opt-in adaptive three-minute monotonic scanning with exact source-PTS refinement and automatic fallback to the proven 30-second scan.",
   "updates": [
+    {
+      "version": "0.4.0",
+      "versionCode": 6,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.4.0/CompilationMaker-Prototype-v0.4.0.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.4.0",
+      "sha256": "a75f7bfb517c3499a3a8e873b23842e2b9c29b49df63511dc70e2f932ef62059",
+      "notes": "Uses three-minute macro checkpoints only for persistent 1-to-N counters, recursively recovers skipped observed states, requires exact persistence for every boundary, and reruns the 30-second profile on any uncertainty."
+    },
     {
       "version": "0.3.1",
       "versionCode": 5,
