@@ -22,12 +22,12 @@ jobs:
       - name: Build and test
         run: |
           chmod +x ./gradlew
-          ./gradlew clean :scanner:test :prototype:testDebugUnitTest :prototype:lintDebug :prototype:assembleDebug
+          ./gradlew clean :scanner:test :prototype:testDebugUnitTest :prototype:lintDebug :prototype:assembleDebug :prototype:assembleRelease
       - name: Prepare APK
         id: artifact
         run: |
           mkdir -p dist
-          cp prototype/build/outputs/apk/debug/prototype-debug.apk "dist/CompilationMaker-Prototype-${GITHUB_REF_NAME}.apk"
+          cp prototype/build/outputs/apk/release/prototype-release.apk "dist/CompilationMaker-Prototype-${GITHUB_REF_NAME}.apk"
           echo "apk=dist/CompilationMaker-Prototype-${GITHUB_REF_NAME}.apk" >> "$GITHUB_OUTPUT"
       - name: Publish release asset
         uses: ncipollo/release-action@v1

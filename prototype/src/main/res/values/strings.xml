@@ -5,4 +5,7 @@
     <string name="transition_results_empty">No scan results yet</string>
     <string name="transition_results_scanning">Scanning for number changes…</string>
     <string name="transition_results_none_confirmed">No confirmed number changes were recorded</string>
+    <string name="check_for_updates">Check for updates</string>
+    <string name="auto_download_updates">Automatically download verified updates</string>
+    <string name="auto_download_updates_explanation">Android will still ask you to approve installation. The app never installs an update silently.</string>
 </resources>

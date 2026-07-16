@@ -69,9 +69,11 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.work.ExistingWorkPolicy
 import androidx.work.Data
 import androidx.work.OneTimeWorkRequest
@@ -84,6 +86,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -242,6 +245,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pipSignalText: TextView
     private lateinit var pipLogText: TextView
     private lateinit var checkUpdatesButton: Button
+    private lateinit var autoUpdateSwitch: CheckBox
     private lateinit var crashLogButton: Button
     private lateinit var transitionResultsText: TextView
     private lateinit var transitionStyleSpinner: Spinner
@@ -258,8 +262,6 @@ class MainActivity : AppCompatActivity() {
     private val compilationWorkName = CompilationJobContract.UNIQUE_WORK_NAME
     private val progressNotificationChannelId = COMPILATION_NOTIFICATION_CHANNEL_ID
     private val progressNotificationId = ACTIVITY_PROGRESS_NOTIFICATION_ID
-    private val updateNotificationChannelId = "compilation_updates"
-    private val updateNotificationId = 6110
     private val workManager by lazy { WorkManager.getInstance(this) }
     @Volatile
     private var compilationWorkId: UUID? = null
@@ -283,16 +285,7 @@ class MainActivity : AppCompatActivity() {
         queueCoreActivity(activity)
     }
     private val coreActivityRenderer = Runnable { renderPendingCoreActivity() }
-    private val updateManifestRawEndpoint =
-        "https://raw.githubusercontent.com/hughbechainez-byte/NumberChangeDetector/main/prototype-update.json"
-    private val updateManifestBlobEndpoint =
-        "https://api.github.com/repos/hughbechainez-byte/NumberChangeDetector/contents/prototype-update.json"
-    private val fallbackReleaseEndpoint =
-        "https://api.github.com/repos/hughbechainez-byte/NumberChangeDetector/releases/latest"
-    private val fallbackReleasesEndpoint =
-        "https://api.github.com/repos/hughbechainez-byte/NumberChangeDetector/releases?per_page=20"
-    private val updateCooldownMs = 12L * 60L * 60L * 1000L
-    private val updatePrefs by lazy { getSharedPreferences("update_prefs", MODE_PRIVATE) }
+    private val updateRepository by lazy { UpdateRepository.get(applicationContext) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -302,9 +295,16 @@ class MainActivity : AppCompatActivity() {
         setUpUi()
         CoreActivityTelemetry.addListener(coreActivityListener)
         ensureProgressNotificationChannel()
-        ensureUpdateNotificationChannel()
+        UpdateNotifier.ensureChannel(this)
         requestPermissionsIfNeeded()
-        checkForUpdates()
+        startForegroundUpdateChecks()
+        handleUpdateIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleUpdateIntent(intent)
     }
 
     override fun onPause() {
@@ -387,6 +387,8 @@ class MainActivity : AppCompatActivity() {
         pipSignalText = binding.pipSignalText
         pipLogText = binding.pipLogText
         checkUpdatesButton = binding.checkUpdatesButton
+        autoUpdateSwitch = binding.autoUpdateSwitch
+        autoUpdateSwitch.isChecked = updateRepository.autoDownloadEnabled
         crashLogButton = binding.crashLogButton
         transitionResultsText = binding.transitionResultsText
         experimentalModeSwitch = binding.experimentalModeSwitch
@@ -640,6 +642,17 @@ class MainActivity : AppCompatActivity() {
         }
         checkUpdatesButton.setOnClickListener {
             checkForUpdates(force = true)
+        }
+        autoUpdateSwitch.setOnCheckedChangeListener { _, checked ->
+            updateRepository.autoDownloadEnabled = checked
+            emitUpdateStatus(
+                if (checked) {
+                    "Verified updates will download automatically. Android still requires install approval."
+                } else {
+                    "Automatic update downloads are off."
+                }
+            )
+            if (checked) checkForUpdates(force = false)
         }
 
         crashLogButton.setOnClickListener {
@@ -2389,124 +2402,69 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkForUpdates(force: Boolean = false) {
-        if (updateNotificationChannelId.isBlank()) {
-            return
-        }
         lifecycleScope.launch {
-            val now = System.currentTimeMillis()
-            val lastCheckMs = updatePrefs.getLong("last_update_check_ms", 0L)
-            if (!force && now - lastCheckMs < updateCooldownMs) {
-                return@launch
-            }
+            performUpdateCheck(force)
+        }
+    }
 
-            updatePrefs.edit().putLong("last_update_check_ms", now).apply()
-
-            val updates = withContext(Dispatchers.IO) { fetchAvailableUpdates() }
-            if (updates.isEmpty()) {
-                if (force) {
-                    runOnUiThread {
-                        emitUpdateStatus("No update information found. Check connection and manifest URL.")
-                    }
+    private fun startForegroundUpdateChecks() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (isActive) {
+                    performUpdateCheck(force = false)
+                    delay(UpdateScheduler.FOREGROUND_CHECK_INTERVAL_MS)
                 }
-                return@launch
-            }
-
-            if (force) {
-                showUpdateCatalogDialog(updates)
-                return@launch
-            }
-
-            val latest = updates.maxByOrNull { updateVersionCode(it.versionName) } ?: return@launch
-            val current = BuildConfig.VERSION_NAME.ifBlank { "0.0.0" }
-            if (!isRemoteVersionNewer(latest.versionName, current)) {
-                return@launch
-            }
-
-            val notifiedVersion = updatePrefs.getString("notified_version", "")
-            if (notifiedVersion == latest.versionName) {
-                return@launch
-            }
-            updatePrefs.edit().putString("notified_version", latest.versionName).apply()
-            notifyUserOfUpdate(latest)
-            runOnUiThread {
-                emitUpdateStatus("Update ${latest.versionName} available. Tap Check for updates to install.")
             }
         }
     }
 
-    private fun showUpdateCatalogDialog(updates: List<UpdateInfo>) {
-        val current = BuildConfig.VERSION_NAME.ifBlank { "0.0.0" }
-        val downloadable = updates
-            .filter { it.downloadUrl.isNotBlank() && it.versionName.isNotBlank() }
-            .map { info ->
-                val suffix = if (isRemoteVersionNewer(info.versionName, current)) " (newer)" else ""
-                info to "${info.versionName}$suffix"
+    private suspend fun performUpdateCheck(force: Boolean) {
+        if (force) emitUpdateStatus("Checking the verified update feed...")
+        when (val check = updateRepository.checkForUpdate()) {
+            is UpdateCheckResult.UpToDate -> if (force) {
+                emitUpdateStatus("CompilationMaker is up to date.")
             }
-
-        if (downloadable.isEmpty()) {
-            runOnUiThread {
-                emitUpdateStatus("No downloadable updates found in release feed.")
+            is UpdateCheckResult.Failed -> if (force) {
+                emitUpdateStatus(check.message)
             }
-            return
-        }
-
-        val candidates = downloadable.map { it.first }
-        runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle("Available updates")
-                .setItems(downloadable.map { it.second }.toTypedArray()) { _, index ->
-                    val info = candidates[index]
-                    AlertDialog.Builder(this)
-                        .setTitle("Install ${info.versionName}")
-                        .setMessage(
-                            if (info.releaseNotes.isBlank()) {
-                                "Install ${info.versionName}?"
-                            } else {
-                                info.releaseNotes
-                            }
-                        )
-                        .setPositiveButton("Install") { _, _ ->
-                            downloadAndInstallUpdate(info)
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
-                }
-                .setPositiveButton("Cancel", null)
-                .show()
-            emitUpdateStatus("Available updates: ${candidates.size}")
+            is UpdateCheckResult.Available -> handleAvailableUpdate(check.info, force)
         }
     }
 
-    private fun notifyUserOfUpdate(info: UpdateInfo) {
-        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+    private suspend fun handleAvailableUpdate(info: UpdateInfo, force: Boolean) {
+        emitUpdateStatus("Verified update ${info.versionName} is available.")
+        val activeCompilation = compilationStartInFlight || hasActiveCompilation()
+        if (!updateRepository.autoDownloadEnabled) {
+            notifyUpdateOnce(info, readyToInstall = false)
+            if (force) showUpdateAvailableDialog(info)
             return
         }
 
-        val updateIntent = packageManager.getLaunchIntentForPackage(packageName)
-            ?: Intent(this, MainActivity::class.java)
-        updateIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        val updatePendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            updateIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationCompat.Builder(this, updateNotificationChannelId)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("CompilationMaker update available")
-            .setContentText("New version ${info.versionName} is available")
-            .setStyle(
-                NotificationCompat.BigTextStyle()
-                    .bigText(
-                        "New version ${info.versionName} is available. Open the app and tap Check for updates to install."
-                            .plus(if (info.releaseNotes.isNotBlank()) "\n\n${info.releaseNotes}" else "")
-                    )
-            )
-            .setContentIntent(updatePendingIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .build()
-        NotificationManagerCompat.from(this).notify(updateNotificationId, notification)
+        if (!shouldAutomaticallyDownloadUpdate(updateRepository.autoDownloadEnabled, activeCompilation)) {
+            emitUpdateStatus("Update ${info.versionName} is available. Automatic download will wait for the active compilation.")
+            notifyUpdateOnce(info, readyToInstall = false)
+            return
+        }
+
+        emitUpdateStatus("Downloading and verifying update ${info.versionName}...")
+        when (val download = updateRepository.downloadAndVerify(info)) {
+            is UpdateDownloadResult.Failed -> {
+                emitUpdateStatus(download.message)
+                notifyUpdateOnce(info, readyToInstall = false)
+            }
+            is UpdateDownloadResult.Ready -> {
+                emitUpdateStatus("Update ${info.versionName} is verified. Android approval is required to install.")
+                notifyUpdateOnce(info, readyToInstall = true)
+                if (force) showUpdateReadyDialog(info)
+            }
+        }
+    }
+
+    private fun notifyUpdateOnce(info: UpdateInfo, readyToInstall: Boolean) {
+        if (!updateRepository.shouldNotify(info, readyToInstall)) return
+        if (UpdateNotifier.notify(this, info, readyToInstall)) {
+            updateRepository.markNotified(info, readyToInstall)
+        }
     }
 
     private fun showUpdateAvailableDialog(info: UpdateInfo) {
@@ -2515,12 +2473,12 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Update ${info.versionName} available")
                 .setMessage(
                     if (info.releaseNotes.isNotBlank()) {
-                        info.releaseNotes
+                        "${info.releaseNotes}\n\nThe APK will be verified before Android asks you to approve installation."
                     } else {
-                        "A newer version is ready to install."
+                        "The APK will be verified before Android asks you to approve installation."
                     }
                 )
-                .setPositiveButton("Install") { _, _ ->
+                .setPositiveButton("Download") { _, _ ->
                     downloadAndInstallUpdate(info)
                 }
                 .setNegativeButton("Later", null)
@@ -2529,64 +2487,54 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun downloadAndInstallUpdate(info: UpdateInfo) {
-        if (info.downloadUrl.isBlank()) {
-            emitUpdateStatus("Update APK link missing from manifest.")
-            return
+    private fun showUpdateReadyDialog(info: UpdateInfo) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Update ${info.versionName} ready")
+                .setMessage("The APK passed its hash, package, version, and signing-certificate checks. Android must approve installation.")
+                .setPositiveButton("Continue") { _, _ -> installVerifiedUpdate(info.versionCode) }
+                .setNegativeButton("Later", null)
+                .show()
         }
+    }
+
+    private fun downloadAndInstallUpdate(info: UpdateInfo) {
         lifecycleScope.launch {
-            emitUpdateStatus("Downloading update ${info.versionName} in the background...")
-            val apk = withContext(Dispatchers.IO) { downloadUpdateApk(info) }
-            if (apk == null) {
-                emitUpdateStatus("Update download failed.")
+            emitUpdateStatus("Downloading and verifying update ${info.versionName}...")
+            when (val download = updateRepository.downloadAndVerify(info)) {
+                is UpdateDownloadResult.Failed -> emitUpdateStatus(download.message)
+                is UpdateDownloadResult.Ready -> {
+                    emitUpdateStatus("Update verified. Opening Android's installer for approval.")
+                    installVerifiedUpdate(info.versionCode)
+                }
+            }
+        }
+    }
+
+    private fun installVerifiedUpdate(versionCode: Long) {
+        lifecycleScope.launch {
+            if (compilationStartInFlight || hasActiveCompilation()) {
+                emitUpdateStatus("Finish or cancel the active compilation before installing an update.")
                 return@launch
             }
-            emitUpdateStatus("Update downloaded. Opening Android installer.")
+            val apk = updateRepository.verifiedDownloadedFile(versionCode)
+            if (apk == null) {
+                emitUpdateStatus("Verified update file is missing or no longer valid. Check for updates again.")
+                return@launch
+            }
             installDownloadedApk(apk)
         }
     }
 
-    private fun downloadUpdateApk(info: UpdateInfo): File? {
-        val targetDir = File(cacheDir, "updates").apply { mkdirs() }
-        targetDir.listFiles()
-            ?.filter { it.extension.equals("apk", ignoreCase = true) }
-            ?.forEach { it.delete() }
-        val safeVersion = info.versionName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val target = File(targetDir, "CompilationMaker-$safeVersion.apk")
-        val connection = try {
-            java.net.URL(info.downloadUrl).openConnection() as java.net.HttpURLConnection
-        } catch (e: Exception) {
-            AppLog.w(this@MainActivity, logTag, "Unable to open update download connection", e)
-            return null
-        }
-
-        return try {
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 30_000
-            connection.setRequestProperty("Accept", "application/vnd.android.package-archive,*/*")
-            connection.connect()
-            if (connection.responseCode !in 200..299) {
-                AppLog.w(this@MainActivity, logTag, "Update download failed with HTTP ${connection.responseCode}")
-                return null
-            }
-            connection.inputStream.use { input ->
-                target.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                    }
-                }
-            }
-            if (target.length() > 0L) target else null
-        } catch (e: Exception) {
-            AppLog.w(this@MainActivity, logTag, "Update download failed", e)
-            target.delete()
-            null
-        } finally {
-            connection.disconnect()
+    private fun handleUpdateIntent(sourceIntent: Intent?) {
+        sourceIntent ?: return
+        val action = sourceIntent.getStringExtra(UpdateContract.EXTRA_ACTION) ?: return
+        val versionCode = sourceIntent.getLongExtra(UpdateContract.EXTRA_VERSION_CODE, -1L)
+        sourceIntent.removeExtra(UpdateContract.EXTRA_ACTION)
+        sourceIntent.removeExtra(UpdateContract.EXTRA_VERSION_CODE)
+        when (action) {
+            UpdateContract.ACTION_DOWNLOAD -> checkForUpdates(force = true)
+            UpdateContract.ACTION_INSTALL -> if (versionCode > 0L) installVerifiedUpdate(versionCode)
         }
     }
 
@@ -2603,8 +2551,8 @@ class MainActivity : AppCompatActivity() {
         )
         val installIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(apkUri, "application/vnd.android.package-archive")
+            clipData = ClipData.newRawUri("verified CompilationMaker update", apkUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         packageManager.queryIntentActivities(installIntent, PackageManager.MATCH_DEFAULT_ONLY)
             .forEach { resolveInfo ->
@@ -2625,7 +2573,7 @@ class MainActivity : AppCompatActivity() {
     private fun showInstallPermissionDialog() {
         AlertDialog.Builder(this)
             .setTitle("Allow app updates")
-            .setMessage("Android needs permission to install updates downloaded by CompilationMaker. Enable Allow from this source, then tap Check for updates again.")
+            .setMessage("Android requires you to trust CompilationMaker as an update source. Enable Allow from this source, return to the app, and tap Check for updates again.")
             .setPositiveButton("Open settings") { _, _ ->
                 val settingsIntent = Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -2635,211 +2583,9 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
-        emitUpdateStatus("Enable install permission, then check for updates again.")
+        emitUpdateStatus("Android install-source approval is required before continuing.")
     }
 
-    private fun ensureUpdateNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(NotificationManager::class.java)
-            val channel = NotificationChannel(
-                updateNotificationChannelId,
-                "Compilation Updates",
-                NotificationManager.IMPORTANCE_DEFAULT
-            )
-            channel.description = "Notifies when a newer app version is available"
-            nm.createNotificationChannel(channel)
-        }
-    }
-
-    private fun fetchAvailableUpdates(): List<UpdateInfo> {
-        val manifestUpdates = fetchManifestUpdateList()
-        if (manifestUpdates.isNotEmpty()) {
-            return manifestUpdates
-        }
-        return try {
-            val response = fetchUrlText(fallbackReleasesEndpoint) ?: return emptyList()
-            val releases = JSONArray(response)
-            (0 until releases.length()).mapNotNull { i ->
-                parseReleaseToUpdateInfo(releases.optJSONObject(i))
-            }
-        } catch (_: Exception) {
-            fetchUpdateFromFallbackRelease()
-        }
-    }
-
-    private fun fetchUpdateFromFallbackRelease(): List<UpdateInfo> {
-        return try {
-            val response = fetchUrlText(fallbackReleaseEndpoint) ?: return emptyList()
-            val json = JSONObject(response)
-            parseReleaseToUpdateInfo(json)?.let { listOf(it) } ?: emptyList()
-        } catch (_: Exception) {
-            runOnUiThread {
-                emitUpdateStatus("Update check failed. Verify manifest and/or release endpoint settings.")
-            }
-            emptyList()
-        }
-    }
-
-    private fun fetchManifestUpdateList(): List<UpdateInfo> {
-        for (endpoint in listOf(updateManifestRawEndpoint, updateManifestBlobEndpoint)) {
-            try {
-                val response = fetchUrlText(endpoint) ?: continue
-                val manifest = parseUpdateManifest(response) ?: continue
-                val listed = manifest.optJSONArray("updates")
-                if (listed != null && listed.length() > 0) {
-                    val explicit = (0 until listed.length()).mapNotNull { i ->
-                        parseManifestUpdate(listed.optJSONObject(i))
-                    }
-                    if (explicit.isNotEmpty()) {
-                        return explicit
-                    }
-                }
-                parseManifestUpdate(manifest)?.let { return listOf(it) }
-            } catch (_: Exception) {
-                continue
-            }
-        }
-        return emptyList()
-    }
-
-    private fun parseManifestUpdate(manifestLike: JSONObject?): UpdateInfo? {
-        if (manifestLike == null) return null
-        val version = manifestLike.optString("version", "")
-            .ifBlank { manifestLike.optString("tag", "") }
-            .ifBlank { manifestLike.optString("name", "") }
-            .ifBlank { "0.0.0" }
-        val apkUrl = (manifestLike.optJSONObject("apk")?.optString("url", "") ?: "")
-            .ifBlank { manifestLike.optString("apkUrl", "") }
-        val releaseUrl = manifestLike.optString("releaseUrl", "")
-            .ifBlank { fallbackReleaseEndpoint }
-        val notes = manifestLike.optString("notes", "").ifBlank { manifestLike.optString("changelog", "") }
-        if (version.isBlank() && apkUrl.isBlank()) {
-            return null
-        }
-        return UpdateInfo(
-            version,
-            releaseUrl,
-            apkUrl,
-            notes
-        )
-    }
-
-    private fun parseReleaseToUpdateInfo(releaseJson: JSONObject?): UpdateInfo? {
-        if (releaseJson == null) return null
-        val version = releaseJson.optString("tag_name", "").ifBlank { releaseJson.optString("name", "") }
-            .ifBlank { "0.0.0" }
-        val releaseUrl = releaseJson.optString("html_url", "")
-        val assets = releaseJson.optJSONArray("assets")
-        val download = selectReleaseApkUrl(assets)
-        val notes = releaseJson.optString("body", "").trim()
-        return UpdateInfo(version, releaseUrl, download, notes)
-    }
-
-    private fun updateVersionCode(version: String): Long {
-        return version
-            .trim()
-            .trimStart('v', 'V')
-            .split(".")
-            .map { it.toLongOrNull() ?: 0L }
-            .fold(0L) { acc, value -> acc * 1000 + value }
-    }
-
-    private fun parseUpdateManifest(response: String): JSONObject? {
-        val top = JSONObject(response)
-        val encoding = top.optString("encoding", "")
-        val raw = top.optString("content", "")
-        if (encoding == "base64" && raw.isNotBlank()) {
-            val manifestContent = String(Base64.decode(raw.replace("\\s".toRegex(), ""), Base64.DEFAULT))
-            return JSONObject(manifestContent)
-        }
-        return top
-    }
-
-    private fun selectReleaseApkUrl(assets: org.json.JSONArray?): String {
-        if (assets == null || assets.length() == 0) return ""
-
-        var prototypeApkUrl = ""
-        var fallbackApkUrl = ""
-        var fallbackApkLikeUrl = ""
-        var fallbackContentTypeUrl = ""
-
-        for (i in 0 until assets.length()) {
-            val asset = assets.optJSONObject(i) ?: continue
-            val name = asset.optString("name", "")
-            val downloadUrl = asset.optString("browser_download_url", "").ifBlank { asset.optString("url", "") }
-            if (downloadUrl.isBlank()) continue
-
-            if (name.endsWith(".apk", ignoreCase = true)) {
-                if (name.contains("CompilationMaker-Prototype", ignoreCase = true)) {
-                    prototypeApkUrl = downloadUrl
-                } else if (fallbackApkUrl.isBlank()) {
-                    fallbackApkUrl = downloadUrl
-                }
-            }
-            if (fallbackApkLikeUrl.isBlank() && name.contains("compilationmaker", ignoreCase = true)) {
-                fallbackApkLikeUrl = downloadUrl
-            }
-            if (fallbackContentTypeUrl.isBlank() && asset.optString("content_type", "").equals("application/vnd.android.package-archive", true)) {
-                fallbackContentTypeUrl = downloadUrl
-            }
-        }
-
-        return prototypeApkUrl
-            .ifBlank { fallbackApkUrl }
-            .ifBlank { fallbackApkLikeUrl }
-            .ifBlank { fallbackContentTypeUrl }
-    }
-
-    private fun isRemoteVersionNewer(remote: String, current: String): Boolean {
-        val remoteNormalized = remote.trim().trimStart('v', 'V').split(".").map { it.toIntOrNull() ?: 0 }
-        val currentNormalized = current.trim().trimStart('v', 'V').split(".").map { it.toIntOrNull() ?: 0 }
-        val maxParts = max(remoteNormalized.size, currentNormalized.size)
-        for (i in 0 until maxParts) {
-            val remotePart = remoteNormalized.getOrElse(i) { 0 }
-            val currentPart = currentNormalized.getOrElse(i) { 0 }
-            when {
-                remotePart > currentPart -> return true
-                remotePart < currentPart -> return false
-            }
-        }
-        return false
-    }
-
-    private fun fetchUrlText(url: String): String? {
-        val connection = try {
-            java.net.URL(url).openConnection() as java.net.HttpURLConnection
-        } catch (_: Exception) {
-            null
-        } ?: return null
-
-        return try {
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("User-Agent", "CompilationMaker-UpdateChecker")
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
-            connection.connect()
-            if (connection.responseCode !in 200..299) {
-                if (connection.responseCode == 404 && url.contains("/contents/")) {
-                    runOnUiThread {
-                        emitUpdateStatus("Update manifest not found at app-update.json in your GitHub repo.")
-                    }
-                } else if (connection.responseCode == 404 && url.contains("/releases/")) {
-                    runOnUiThread {
-                        emitUpdateStatus("Release endpoint not found. Ensure releases are enabled for your repo.")
-                    }
-                }
-                null
-            } else {
-                connection.inputStream.bufferedReader().use { it.readText() }
-            }
-        } catch (_: Exception) {
-            null
-        } finally {
-            connection.disconnect()
-        }
-    }
 }
 
 class VideoCompilationEngine(private val context: Context) : AutoCloseable {
@@ -6188,13 +5934,6 @@ private data class RoiSignature(
 private data class TimedResult<T>(
     val value: T,
     val elapsedMs: Long
-)
-
-private data class UpdateInfo(
-    val versionName: String,
-    val releaseUrl: String,
-    val downloadUrl: String,
-    val releaseNotes: String
 )
 
 private data class FrameProviderSelection(

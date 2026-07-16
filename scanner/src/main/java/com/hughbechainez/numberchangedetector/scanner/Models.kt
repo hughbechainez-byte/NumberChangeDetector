@@ -229,6 +229,32 @@ fun buildTransitionBrackets(points: List<StatePoint>): List<TransitionBracket> {
     return result
 }
 
+/**
+ * Finds the earliest target sample that is persistent under the scanner's existing rule:
+ * the target must be seen again in either of the next two samples, except that the final
+ * source sample may stand alone. Samples are requested lazily so work after the first
+ * confirmed boundary is never decoded or sent through OCR.
+ */
+internal suspend fun findFirstPersistentTargetIndex(
+    searchStart: Int,
+    searchEnd: Int,
+    sourceLastIndex: Int,
+    targetNumber: Int,
+    valueAt: suspend (Int) -> Int?
+): Int? {
+    if (searchStart > searchEnd) return null
+    for (index in searchStart..searchEnd) {
+        if (valueAt(index) != targetNumber) continue
+        if (index == sourceLastIndex) return index
+
+        val confirmationEnd = minOf(searchEnd, index + 2)
+        for (next in (index + 1)..confirmationEnd) {
+            if (valueAt(next) == targetNumber) return index
+        }
+    }
+    return null
+}
+
 fun formatTimestampMs(timeMs: Long): String {
     val safe = timeMs.coerceAtLeast(0L)
     val hours = safe / 3_600_000L

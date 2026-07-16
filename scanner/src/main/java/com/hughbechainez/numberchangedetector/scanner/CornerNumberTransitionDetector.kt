@@ -300,6 +300,7 @@ class CornerNumberTransitionDetector(
         val observed = LinkedHashMap<Long, DigitEvidence>()
         suspend fun valueAt(index: Int): Int? {
             val time = sampleTimes[index]
+            observed[time]?.let { return it.parsedNumber }
             emitCore(
                 CoreActivityEvent(
                     CoreActivityStage.PTS_CONFIRMATION,
@@ -341,7 +342,12 @@ class CornerNumberTransitionDetector(
 
         val searchStart = max(0, low - 6)
         val searchEnd = min(sampleTimes.lastIndex, low + 8)
-        for (index in searchStart..searchEnd) {
+        val boundaryIndex = findFirstPersistentTargetIndex(
+            searchStart = searchStart,
+            searchEnd = searchEnd,
+            sourceLastIndex = sampleTimes.lastIndex,
+            targetNumber = bracket.toNumber
+        ) { index ->
             emitCore(
                 CoreActivityEvent(
                     CoreActivityStage.PTS_CONFIRMATION,
@@ -352,13 +358,6 @@ class CornerNumberTransitionDetector(
                 )
             )
             valueAt(index)
-        }
-
-        val boundaryIndex = (searchStart..searchEnd).firstOrNull { index ->
-            observed[sampleTimes[index]]?.parsedNumber == bracket.toNumber &&
-                ((index + 1..min(searchEnd, index + 2)).any { next ->
-                    observed[sampleTimes[next]]?.parsedNumber == bracket.toNumber
-                } || index == sampleTimes.lastIndex)
         } ?: return null
 
         val boundaryMs = sampleTimes[boundaryIndex]

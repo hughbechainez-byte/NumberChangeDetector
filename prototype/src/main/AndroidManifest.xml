@@ -20,6 +20,7 @@
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
         android:theme="@style/Theme.CompilationMaker">
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
