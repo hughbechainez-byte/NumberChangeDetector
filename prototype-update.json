@@ -1,11 +1,19 @@
 {
-  "version": "0.3.0",
-  "versionCode": 4,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.0/CompilationMaker-Prototype-v0.3.0.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.0",
-  "sha256": "7a1e8a8770a0df8ee25a69d5bd90712b94821336c5fd30b66fac43c45693e288",
-  "notes": "Background-ready prototype with live PiP percentage/status, concise or core-activity feeds, and bounded active-job wake protection.",
+  "version": "0.3.1",
+  "versionCode": 5,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.1/CompilationMaker-Prototype-v0.3.1.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.1",
+  "sha256": "76a9c82b09599fa9327fe3d6da3bc48f34d030777f90ff0f3333df3469b376a8",
+  "notes": "Verified periodic update checks, optional automatic APK download with Android install approval, and policy-equivalent lazy boundary confirmation.",
   "updates": [
+    {
+      "version": "0.3.1",
+      "versionCode": 5,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.3.1/CompilationMaker-Prototype-v0.3.1.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.3.1",
+      "sha256": "76a9c82b09599fa9327fe3d6da3bc48f34d030777f90ff0f3333df3469b376a8",
+      "notes": "Checks every five minutes while visible or in PiP and every 15 minutes in the background, verifies the release hash/package/version/signer, defers downloads during active compilation, and stops boundary OCR as soon as persistence is proven."
+    },
     {
       "version": "0.3.0",
       "versionCode": 4,
