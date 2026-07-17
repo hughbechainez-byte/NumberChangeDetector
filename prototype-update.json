@@ -1,11 +1,19 @@
 {
-  "version": "0.4.0",
-  "versionCode": 6,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.4.0/CompilationMaker-Prototype-v0.4.0.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.4.0",
-  "sha256": "a75f7bfb517c3499a3a8e873b23842e2b9c29b49df63511dc70e2f932ef62059",
-  "notes": "Opt-in adaptive three-minute monotonic scanning with exact source-PTS refinement and automatic fallback to the proven 30-second scan.",
+  "version": "0.5.0",
+  "versionCode": 7,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.5.0/CompilationMaker-Prototype-v0.5.0.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.5.0",
+  "sha256": "895d8a8a549fac0978590ec746612fbb150e3ddb37e1fbca9df99421267d619a",
+  "notes": "Adds multi-video selection with a serial batch queue, per-video elapsed times, whole-batch elapsed time, queue status persistence, and PiP/background progress continuity.",
   "updates": [
+    {
+      "version": "0.5.0",
+      "versionCode": 7,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.5.0/CompilationMaker-Prototype-v0.5.0.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.5.0",
+      "sha256": "895d8a8a549fac0978590ec746612fbb150e3ddb37e1fbca9df99421267d619a",
+      "notes": "Select multiple videos once; the app compiles them one at a time to keep decoder, OCR, encoder, memory, storage, and thermal load stable. The queue shows per-video state and elapsed time plus total batch elapsed time, and resumes its status after reopening."
+    },
     {
       "version": "0.4.0",
       "versionCode": 6,
