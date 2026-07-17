@@ -28,7 +28,10 @@ class CompilationWorker(
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
 
+    private var startedAtMs: Long = 0L
+
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        startedAtMs = System.currentTimeMillis()
         val workId = id.toString()
         val jobStore = CompilationJobStore(applicationContext)
         promoteToForeground("starting", "Preparing compilation", 0)?.let {
@@ -577,6 +580,7 @@ class CompilationWorker(
             KEY_PROGRESS_PHASE to phase,
             KEY_PROGRESS_MESSAGE to message,
             KEY_PROGRESS_PERCENT to percent,
+            KEY_ELAPSED_MS to (System.currentTimeMillis() - startedAtMs).coerceAtLeast(0L),
             KEY_FALLBACK_USED to fallbackUsed,
             CompilationJobContract.KEY_PIPELINE_STATE to pipelineState.name
         )
@@ -719,6 +723,7 @@ class CompilationWorker(
         const val KEY_PROGRESS_PHASE = "progressPhase"
         const val KEY_PROGRESS_MESSAGE = "progressMessage"
         const val KEY_PROGRESS_PERCENT = "progressPercent"
+        const val KEY_ELAPSED_MS = "elapsedMs"
         const val KEY_OUTPUT_PATH = "outputPath"
         const val KEY_REPORT_PATH = "reportPath"
         const val KEY_FALLBACK_USED = "fallbackUsed"

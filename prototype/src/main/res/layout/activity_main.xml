@@ -379,6 +379,17 @@
             android:textIsSelectable="true"
             android:textSize="12sp" />
 
+        <TextView
+            android:id="@+id/batchQueueText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#102638"
+            android:padding="8dp"
+            android:text="Select one or more videos. Multiple videos run serially in this queue."
+            android:textColor="#D7F0FF"
+            android:textSize="12sp" />
+
         <Button
             android:id="@+id/checkUpdatesButton"
             android:layout_width="match_parent"
@@ -449,6 +460,14 @@
             android:text="Status feed"
             android:textSize="12sp"
             android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/elapsedTimeText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="Elapsed: 00:00"
+            android:textSize="12sp" />
 
         <CheckBox
             android:id="@+id/coreStatusSwitch"

@@ -122,6 +122,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var selectedVideoUri: Uri? = null
+    private val selectedVideoUris = mutableListOf<Uri>()
     private var isBusy = false
     private var isScrubbing = false
     private val statusFeedLines = ArrayDeque<String>()
@@ -169,30 +170,34 @@ class MainActivity : AppCompatActivity() {
             if (result.resultCode != Activity.RESULT_OK) {
                 return@registerForActivityResult
             }
-            val picked = result.data?.data ?: return@registerForActivityResult
-            try {
-                contentResolver.takePersistableUriPermission(
-                    picked,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-                // optional persist permission not required for this session
+            val data = result.data ?: return@registerForActivityResult
+            val pickedUris = buildList {
+                data.clipData?.let { clip -> for (index in 0 until clip.itemCount) add(clip.getItemAt(index).uri) }
+                data.data?.let { add(it) }
+            }.distinct()
+            if (pickedUris.isEmpty()) return@registerForActivityResult
+            pickedUris.forEach { picked ->
+                try { contentResolver.takePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: SecurityException) { }
             }
-            onVideoSelected(picked)
+            onVideosSelected(pickedUris)
         }
 
-    private fun onVideoSelected(picked: Uri) {
+    private fun onVideosSelected(pickedUris: List<Uri>) {
         if (hasActiveCompilation()) {
             emitTransientStatus("A compilation is already active. Reopen it instead of selecting another video.")
             restoreActiveCompilationWork()
             return
         }
+        selectedVideoUris.clear()
+        selectedVideoUris.addAll(pickedUris)
+        val picked = pickedUris.first()
         selectedVideoUri = picked
         loadSelectedVideoMetadata(picked)
         restoreRoiState(picked)
-        binding.selectedVideo.text = picked.toString()
+        binding.selectedVideo.text = if (pickedUris.size == 1) picked.toString() else "${pickedUris.size} videos selected"
+        binding.batchQueueText.text = pickedUris.mapIndexed { index, uri -> "${index + 1}. ${displayName(uri)} — queued" }.joinToString("\n")
         persistDraftState(CompilationPipelineState.VIDEO_SELECTED, "Video selected")
-        emitRoiStatus("Video selected: ${picked.toString().take(60)}")
+        emitRoiStatus(if (pickedUris.size == 1) "Video selected: ${picked.toString().take(60)}" else "${pickedUris.size} videos queued. The same ROI and scan settings apply to each video.")
         setUiBusy(false)
         setupVideoPreview(picked)
     }
@@ -207,8 +212,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         baseIntent.putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/mp4", "video/webm", "video/quicktime", "video/*"))
+        baseIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
         videoPickerLauncher.launch(baseIntent)
     }
+
+    private fun displayName(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf("_display_name"), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else uri.lastPathSegment.orEmpty()
+        } ?: uri.lastPathSegment.orEmpty()
+    }.getOrDefault(uri.lastPathSegment.orEmpty()).ifBlank { "video" }
 
     private lateinit var qualitySpinner: Spinner
     private lateinit var formatSpinner: Spinner
@@ -232,6 +244,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scanAreaWidth: EditText
     private lateinit var scanAreaHeight: EditText
     private lateinit var progressPercentText: TextView
+    private lateinit var elapsedTimeText: TextView
     private lateinit var backgroundStatusBanner: TextView
     private lateinit var statusFeedText: TextView
     private lateinit var statusFeedScroll: ScrollView
@@ -244,6 +257,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pipStatusText: TextView
     private lateinit var pipSignalText: TextView
     private lateinit var pipLogText: TextView
+    private lateinit var batchQueueText: TextView
     private lateinit var checkUpdatesButton: Button
     private lateinit var autoUpdateSwitch: CheckBox
     private lateinit var crashLogButton: Button
@@ -267,7 +281,11 @@ class MainActivity : AppCompatActivity() {
     private var compilationWorkId: UUID? = null
     private var activeWorkInfoLiveData: LiveData<WorkInfo?>? = null
     private var activeWorkObserver: Observer<WorkInfo?>? = null
+    private var activeBatchWorkInfoLiveData: LiveData<WorkInfo?>? = null
+    private var activeBatchWorkObserver: Observer<WorkInfo?>? = null
+    private var batchWorkId: UUID? = null
     private val compilationJobStore by lazy { CompilationJobStore(applicationContext) }
+    private val compilationBatchStore by lazy { CompilationBatchStore(applicationContext) }
     private var currentPipelineState = CompilationPipelineState.IDLE
     private var latestWorkManagerState: WorkInfo.State? = null
     private var compilationStartInFlight = false
@@ -335,11 +353,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         restoreActiveCompilationWork()
+        restoreActiveBatchWork()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         dismissCompilationWorkObserver()
+        dismissBatchWorkObserver()
         CoreActivityTelemetry.removeListener(coreActivityListener)
         backgroundStatusHandler.removeCallbacks(coreActivityRenderer)
         stopPreviewProgressUpdates()
@@ -386,6 +406,8 @@ class MainActivity : AppCompatActivity() {
         pipStatusText = binding.pipStatusText
         pipSignalText = binding.pipSignalText
         pipLogText = binding.pipLogText
+        batchQueueText = binding.batchQueueText
+        elapsedTimeText = binding.elapsedTimeText
         checkUpdatesButton = binding.checkUpdatesButton
         autoUpdateSwitch = binding.autoUpdateSwitch
         autoUpdateSwitch.isChecked = updateRepository.autoDownloadEnabled
@@ -638,7 +660,11 @@ class MainActivity : AppCompatActivity() {
             val transitionStyle = transitionStyleOptions[transitionStyleSpinner.selectedItemPosition.coerceIn(0, transitionStyleOptions.lastIndex)]
             compilationStartInFlight = true
             setUiBusy(true)
-            startCompilationJob(source, quality, format, transitionStyle)
+            if (selectedVideoUris.size > 1) {
+                startCompilationBatch(selectedVideoUris.toList(), quality, format, transitionStyle)
+            } else {
+                startCompilationJob(source, quality, format, transitionStyle)
+            }
         }
         checkUpdatesButton.setOnClickListener {
             checkForUpdates(force = true)
@@ -1008,6 +1034,7 @@ class MainActivity : AppCompatActivity() {
                     CompilationWorker.KEY_PROGRESS_PERCENT,
                     compilationJobStore.load()?.progressPercent ?: 0
                 )
+                val elapsed = data.getLong(CompilationWorker.KEY_ELAPSED_MS, 0L)
                 val message = data.getString(CompilationWorker.KEY_PROGRESS_MESSAGE)
                     ?: if (workInfo.state == WorkInfo.State.BLOCKED) {
                         "Compilation is waiting for WorkManager prerequisites"
@@ -1021,7 +1048,8 @@ class MainActivity : AppCompatActivity() {
                     ?: CompilationPipelineState.PREPARING)
                 currentPipelineState = nextState
                 renderTransitionResults(compilationJobStore.load())
-                emitCompilationProgress(message, percent, phase, nextState)
+                elapsedTimeText.text = "Elapsed: ${formatElapsedForUi(elapsed)}"
+                emitCompilationProgress("$message • elapsed ${formatElapsedForUi(elapsed)}", percent, phase, nextState)
                 isBusy = true
                 setUiBusy(true)
             }
@@ -1249,10 +1277,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun restoreActiveBatchWork() {
+        lifecycleScope.launch {
+            val info = withContext(Dispatchers.IO) {
+                workManager.getWorkInfosForUniqueWork("compilation-batch").get().firstOrNull { isActiveWorkManagerState(it.state) }
+            } ?: return@launch
+            batchWorkId = info.id
+            compilationBatchStore.load()?.let { record ->
+                binding.batchQueueText.text = record.items.mapIndexed { index, item -> "${index + 1}. ${item.label} — ${item.state}" }.joinToString("\n")
+            }
+            observeBatchWork(info.id)
+            isBusy = true
+            setUiBusy(true)
+        }
+    }
+
     private fun hasActiveCompilation(): Boolean {
         return isActiveWorkManagerState(latestWorkManagerState) ||
             currentPipelineState.isActive ||
-            compilationJobStore.load()?.state?.isActive == true
+            compilationJobStore.load()?.state?.isActive == true ||
+            batchWorkId != null
     }
 
     private fun canInitializeRoiUi(): Boolean {
@@ -1946,6 +1990,116 @@ class MainActivity : AppCompatActivity() {
         }
         return builder.build()
     }
+
+    private fun startCompilationBatch(
+        uris: List<Uri>,
+        quality: ExportQuality,
+        format: ExportFormat,
+        transitionStyle: TransitionStyle
+    ) {
+        lifecycleScope.launch {
+            try {
+                val profile = selectedCheckpointProfile()
+                val requestedScanMode = if (experimentalModeSwitch.isChecked) ScanMode.Experimental else profile.mode
+                val scanWindowJson = JSONObject().apply {
+                    put("xPercent", selectedScanWindow.xPercent)
+                    put("yPercent", selectedScanWindow.yPercent)
+                    put("widthPercent", selectedScanWindow.widthPercent)
+                    put("heightPercent", selectedScanWindow.heightPercent)
+                }.toString()
+                val batchId = "batch-${System.currentTimeMillis()}"
+                val itemJson = JSONArray().apply {
+                    uris.forEach { uri -> put(JSONObject().apply { put("uri", uri.toString()); put("label", displayName(uri)) }) }
+                }.toString()
+                val input = Data.Builder()
+                    .putString(BatchCompilationWorker.KEY_BATCH_ID, batchId)
+                    .putString(BatchCompilationWorker.KEY_ITEMS_JSON, itemJson)
+                    .putString(CompilationWorker.KEY_SCAN_WINDOW, scanWindowJson)
+                    .putInt(CompilationWorker.KEY_SCAN_MODE, requestedScanMode.ordinal)
+                    .putLong(CompilationWorker.KEY_CHECKPOINT_INTERVAL_MS, profile.frameStepMs)
+                    .putString(CompilationWorker.KEY_SCANNER_PROFILE_ID, profile.scannerProfileId)
+                    .putInt(CompilationWorker.KEY_EXPERIMENTAL_DOWNSCALE, selectedExperimentalDownscaleSize())
+                    .putInt(CompilationWorker.KEY_QUALITY_ORDINAL, quality.ordinal)
+                    .putInt(CompilationWorker.KEY_FORMAT_ORDINAL, format.ordinal)
+                    .putInt(CompilationWorker.KEY_TRANSITION_STYLE_ORDINAL, transitionStyle.ordinal)
+                    .putInt(CompilationWorker.KEY_VIDEO_ROTATION, selectedVideoRotationDegrees)
+                    .build()
+                clearPendingCompilationPreview(deleteFile = true)
+                clearStatusFeed("Batch queued")
+                emitCompilationProgress("Queued ${uris.size} videos; processing one at a time", 0)
+                val request = OneTimeWorkRequestBuilder<BatchCompilationWorker>().setInputData(input).build()
+                val now = System.currentTimeMillis()
+                compilationBatchStore.save(CompilationBatchRecord(
+                    batchId = batchId,
+                    workId = request.id.toString(),
+                    startedAtMs = now,
+                    updatedAtMs = now,
+                    items = uris.map { CompilationBatchItem(it.toString(), displayName(it)) }
+                ))
+                withContext(Dispatchers.IO) { workManager.enqueueUniqueWork("compilation-batch", ExistingWorkPolicy.REPLACE, request).result.get() }
+                batchWorkId = request.id
+                observeBatchWork(request.id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                recordHandledWorkerFailure(this@MainActivity, logTag, "Batch enqueue failed", failure)
+                emitCompilationProgress("Unable to queue batch: ${failure.message ?: failure::class.java.simpleName}", 100)
+                setUiBusy(false)
+                isBusy = false
+            } finally {
+                compilationStartInFlight = false
+            }
+        }
+    }
+
+    private fun observeBatchWork(workId: UUID) {
+        activeBatchWorkObserver?.let { activeBatchWorkInfoLiveData?.removeObserver(it) }
+        activeBatchWorkObserver = Observer { workInfo ->
+            if (workInfo == null) return@Observer
+            val progress = workInfo.progress
+            val percent = progress.getInt(BatchCompilationWorker.KEY_PERCENT, 0)
+            val elapsed = progress.getLong(BatchCompilationWorker.KEY_ELAPSED_MS, 0L)
+            val status = progress.getString(BatchCompilationWorker.KEY_STATUS) ?: "Batch processing"
+            when (workInfo.state) {
+                WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED -> {
+                    latestWorkManagerState = workInfo.state
+                    isBusy = true
+                    setUiBusy(true)
+                    emitCompilationProgress("$status • elapsed ${formatElapsedForUi(elapsed)}", percent)
+                }
+                WorkInfo.State.SUCCEEDED -> {
+                    latestWorkManagerState = workInfo.state
+                    val record = compilationBatchStore.load()
+                    emitCompilationProgress("Batch complete • total elapsed ${formatElapsedForUi(workInfo.outputData.getLong(BatchCompilationWorker.KEY_ELAPSED_MS, elapsed))}", 100)
+                    binding.batchQueueText.text = record?.items?.mapIndexed { index, item ->
+                        "${index + 1}. ${item.label} — ${item.state} (${formatElapsedForUi(item.elapsedMs)})"
+                    }?.joinToString("\n") ?: binding.batchQueueText.text
+                    isBusy = false
+                    setUiBusy(false)
+                    dismissBatchWorkObserver()
+                }
+                WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
+                    latestWorkManagerState = workInfo.state
+                    val message = workInfo.outputData.getString(BatchCompilationWorker.KEY_ERROR) ?: "Batch stopped"
+                    emitCompilationProgress("$message • elapsed ${formatElapsedForUi(elapsed)}", 100)
+                    isBusy = false
+                    setUiBusy(false)
+                    dismissBatchWorkObserver()
+                }
+            }
+        }
+        activeBatchWorkInfoLiveData = workManager.getWorkInfoByIdLiveData(workId)
+        activeBatchWorkInfoLiveData?.observe(this, activeBatchWorkObserver!!)
+    }
+
+    private fun dismissBatchWorkObserver() {
+        activeBatchWorkObserver?.let { activeBatchWorkInfoLiveData?.removeObserver(it) }
+        activeBatchWorkObserver = null
+        activeBatchWorkInfoLiveData = null
+        batchWorkId = null
+    }
+
+    private fun formatElapsedForUi(ms: Long): String = "%02d:%02d".format(ms / 60_000L, (ms / 1_000L) % 60L)
 
     private fun updatePictureInPictureParams(activeJob: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
