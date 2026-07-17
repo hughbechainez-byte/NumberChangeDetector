@@ -1,11 +1,19 @@
 {
-  "version": "0.5.0",
-  "versionCode": 7,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.5.0/CompilationMaker-Prototype-v0.5.0.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.5.0",
-  "sha256": "895d8a8a549fac0978590ec746612fbb150e3ddb37e1fbca9df99421267d619a",
-  "notes": "Adds multi-video selection with a serial batch queue, per-video elapsed times, whole-batch elapsed time, queue status persistence, and PiP/background progress continuity.",
+  "version": "0.6.0",
+  "versionCode": 8,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.0/CompilationMaker-Prototype-v0.6.0.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.0",
+  "sha256": "c44cf61a691a2f5b5509fc10e7b3ba6d765a6495ca29d0029ff84cb2d0d176a5",
+  "notes": "Adds opt-in Experimental Quick Mode with adaptive five-minute checkpoints, smaller ROI-focused decoding, hardware-scaled parallel refinement, thermal protection, and optimized Media3 export.",
   "updates": [
+    {
+      "version": "0.6.0",
+      "versionCode": 8,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.0/CompilationMaker-Prototype-v0.6.0.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.0",
+      "sha256": "c44cf61a691a2f5b5509fc10e7b3ba6d765a6495ca29d0029ff84cb2d0d176a5",
+      "notes": "Experimental Quick Mode uses five-minute monotonic checkpoints, adaptive skipped-state recovery, 384px ROI-focused frame decoding, two or three independent decoder/OCR refinement lanes based on CPU count, severe-thermal fallback to one lane, 30-second scan fallback on uncertainty, audio transmuxing, and Media3 trim optimization."
+    },
     {
       "version": "0.5.0",
       "versionCode": 7,
