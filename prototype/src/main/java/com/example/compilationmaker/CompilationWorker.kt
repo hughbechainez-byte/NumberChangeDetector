@@ -47,6 +47,7 @@ class CompilationWorker(
         val scanModeOrdinal = inputData.getInt(KEY_SCAN_MODE, ScanMode.StableCheckpoint.ordinal)
         val checkpointIntervalMs = inputData.getLong(KEY_CHECKPOINT_INTERVAL_MS, 30_000L)
         val scannerProfileId = inputData.getString(KEY_SCANNER_PROFILE_ID)
+        val quickMode = scannerProfileId == QUICK_MODE_PROFILE_ID
         val downscaleSize = inputData.getInt(KEY_EXPERIMENTAL_DOWNSCALE, 32)
         val rotation = inputData.getInt(KEY_VIDEO_ROTATION, 0)
         val scanWindowRaw = inputData.getString(KEY_SCAN_WINDOW)
@@ -248,7 +249,8 @@ class CompilationWorker(
                 quality = quality,
                 format = format,
                 transitionStyle = transitionStyle,
-                outputFile = expectedOutputFile
+                outputFile = expectedOutputFile,
+                quickMode = quickMode
             ) { message, percent ->
                 val exportPercent = ((percent * 0.35f) + 55f).toInt().coerceIn(55, 95)
                 setProgressCompat("export", message, exportPercent, fallbackUsed)
@@ -731,6 +733,7 @@ class CompilationWorker(
         const val KEY_ERROR_MESSAGE = "errorMessage"
 
         private const val COMPILATION_WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1_000L
+        private const val QUICK_MODE_PROFILE_ID = "QUICK_5_MIN"
 
     }
 }

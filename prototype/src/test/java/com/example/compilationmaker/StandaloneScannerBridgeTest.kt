@@ -23,6 +23,7 @@ class StandaloneScannerBridgeTest {
         assertEquals(ScanProfile.FAST, standaloneProfileFor(60_000L))
         assertEquals(ScanProfile.FAST, standaloneProfileFor(180_000L))
         assertEquals(ScanProfile.MONOTONIC_3_MIN, standaloneProfileFor(180_000L, "MONOTONIC_3_MIN"))
+        assertEquals(ScanProfile.QUICK_5_MIN, standaloneProfileFor(300_000L, "QUICK_5_MIN"))
     }
 
     @Test

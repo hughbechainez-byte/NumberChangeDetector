@@ -210,12 +210,19 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="Scan interval" />
+            android:text="Scan mode" />
 
         <Spinner
             android:id="@+id/scanSpeedPicker"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Experimental Quick Mode uses 5-minute adaptive checkpoints, smaller ROI-focused decoding, parallel decoder/OCR refinement lanes, and fast Media3 export. It can run hotter and automatically reduces parallelism at severe thermal status; uncertain scans fall back to the proven 30-second path."
+            android:textSize="11sp" />
 
         <TextView
             android:id="@+id/experimentalModeLabel"

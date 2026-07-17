@@ -32,6 +32,7 @@ internal class Media3CompilationExporter(context: Context) {
         sourceUri: Uri,
         segments: List<SegmentWindow>,
         output: File,
+        quickMode: Boolean = false,
         progress: (message: String, percent: Int) -> Unit
     ) {
         require(segments.isNotEmpty()) { "No segments to export" }
@@ -91,7 +92,7 @@ internal class Media3CompilationExporter(context: Context) {
                     }
                     val sequence = EditedMediaItemSequence.withAudioAndVideoFrom(editedItems)
                     val composition = Composition.Builder(sequence)
-                        .setTransmuxAudio(false)
+                        .setTransmuxAudio(quickMode)
                         .setTransmuxVideo(false)
                         .build()
                     val listener = object : Transformer.Listener {
@@ -115,7 +116,7 @@ internal class Media3CompilationExporter(context: Context) {
                             finishWithFailure(exportException, cancelTransformer = false)
                         }
                     }
-                    val activeTransformer = Transformer.Builder(appContext)
+                    val transformerBuilder = Transformer.Builder(appContext)
                         .setAudioMimeType(MimeTypes.AUDIO_AAC)
                         .setVideoMimeType(MimeTypes.VIDEO_H264)
                         // Sparse source clips can require a slow seek/codec reset on emulators and
@@ -123,7 +124,10 @@ internal class Media3CompilationExporter(context: Context) {
                         // Media3's 25-second default between muxed samples.
                         .setMaxDelayBetweenMuxerSamplesMs(MAX_DELAY_BETWEEN_MUXER_SAMPLES_MS)
                         .addListener(listener)
-                        .build()
+                    if (quickMode) {
+                        transformerBuilder.experimentalSetTrimOptimizationEnabled(true)
+                    }
+                    val activeTransformer = transformerBuilder.build()
                     transformer = activeTransformer
 
                     val progressHolder = ProgressHolder()

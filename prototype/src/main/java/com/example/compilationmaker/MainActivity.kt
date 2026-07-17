@@ -4383,6 +4383,7 @@ class VideoCompilationEngine(private val context: Context) : AutoCloseable {
         format: ExportFormat,
         transitionStyle: TransitionStyle,
         outputFile: File? = null,
+        quickMode: Boolean = false,
         progress: (String, Int) -> Unit
     ): VerifiedCompilationOutput = withContext(Dispatchers.IO) {
         val safeFormat = if (format == ExportFormat.Webm) ExportFormat.Mp4 else format
@@ -4410,7 +4411,7 @@ class VideoCompilationEngine(private val context: Context) : AutoCloseable {
             )
             try {
                 withTimeout(EXPORT_TIMEOUT_MS) {
-                    Media3CompilationExporter(context).export(sourceUri, exactSegments, output) { message, percent ->
+                    Media3CompilationExporter(context).export(sourceUri, exactSegments, output, quickMode) { message, percent ->
                         AppLog.i(context, tag, "[export] progress $percent%: $message thread=${Thread.currentThread().name}")
                         progress(message, percent)
                     }
@@ -6109,6 +6110,7 @@ internal data class ScanProfile(
 internal fun compilationScanProfiles(): Array<ScanProfile> = arrayOf(
     ScanProfile("Prototype Fast PTS (30s)", 30_000L, ScanMode.StableCheckpoint, "FAST"),
     ScanProfile("Monotonic Turbo PTS (3m adaptive, persistent 1→N)", 180_000L, ScanMode.StableCheckpoint, "MONOTONIC_3_MIN"),
+    ScanProfile("Experimental Quick Mode (5m adaptive + parallel hardware)", 300_000L, ScanMode.StableCheckpoint, "QUICK_5_MIN"),
     ScanProfile("Prototype Balanced PTS (10s)", 10_000L, ScanMode.StableCheckpoint, "BALANCED"),
     ScanProfile("Prototype Precise PTS (3s)", 3_000L, ScanMode.StableCheckpoint, "PRECISE"),
     ScanProfile("Legacy Experimental (125ms)", 125L, ScanMode.Experimental)

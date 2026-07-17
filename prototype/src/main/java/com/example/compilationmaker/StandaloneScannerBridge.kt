@@ -2,6 +2,8 @@ package com.example.compilationmaker
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
 import com.hughbechainez.numberchangedetector.scanner.CornerNumberTransitionDetector
 import com.hughbechainez.numberchangedetector.scanner.CoreActivityEvent
 import com.hughbechainez.numberchangedetector.scanner.DetectionProgress
@@ -60,6 +62,8 @@ internal class StandaloneScannerBridge(private val context: Context) {
         progress: (CompilationPipelineState, String, Int) -> Unit,
         coreActivity: (CoreActivityEvent) -> Unit = {}
     ): StandaloneScanBridgeResult {
+        val profile = standaloneProfileFor(requestedIntervalMs, requestedProfileId)
+        val quickMode = profile == DetectorScanProfile.QUICK_5_MIN
         val result = CornerNumberTransitionDetector(context).detectWithCoreActivity(
             request = TransitionDetectionRequest(
                 sourceUri = sourceUri,
@@ -69,8 +73,9 @@ internal class StandaloneScannerBridge(private val context: Context) {
                     widthFraction = scanWindow.widthPercent,
                     heightFraction = scanWindow.heightPercent
                 ),
-                profile = standaloneProfileFor(requestedIntervalMs, requestedProfileId),
-                targetFrameWidthPx = 640
+                profile = profile,
+                targetFrameWidthPx = if (quickMode) QUICK_MODE_FRAME_WIDTH_PX else 640,
+                maxParallelRefinements = if (quickMode) quickModeParallelism(context) else 1
             ),
             onProgress = { detectorProgress ->
                 val mapped = mapStandaloneProgress(detectorProgress)
@@ -101,9 +106,26 @@ internal fun standaloneProfileFor(
 internal fun prototypeProfileLabel(profile: DetectorScanProfile): String = when (profile) {
     DetectorScanProfile.FAST -> "Prototype Fast PTS (30s)"
     DetectorScanProfile.MONOTONIC_3_MIN -> "Monotonic Turbo PTS (3m adaptive, persistent 1→N)"
+    DetectorScanProfile.QUICK_5_MIN -> "Experimental Quick Mode (5m adaptive, parallel hardware lanes)"
     DetectorScanProfile.BALANCED -> "Prototype Balanced PTS (10s)"
     DetectorScanProfile.PRECISE -> "Prototype Precise PTS (3s)"
 }
+
+internal fun quickModeParallelism(context: Context): Int {
+    val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    val thermalSevere = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        (power?.currentThermalStatus ?: PowerManager.THERMAL_STATUS_NONE) >= PowerManager.THERMAL_STATUS_SEVERE
+    } else false
+    if (thermalSevere) return 1
+    return when {
+        cores >= 8 -> 3
+        cores >= 4 -> 2
+        else -> 1
+    }
+}
+
+private const val QUICK_MODE_FRAME_WIDTH_PX = 384
 
 internal fun mapStandaloneProgress(progress: DetectionProgress): StandaloneProgress {
     val state = when (progress.phase) {

@@ -31,6 +31,7 @@ enum class CornerPreset(val label: String, val window: ScanWindow) {
 enum class ScanProfile(val label: String, val checkpointIntervalMs: Long) {
     FAST("Fast - 30 second skim", 30_000L),
     MONOTONIC_3_MIN("Monotonic turbo - adaptive 3 minute skim", 180_000L),
+    QUICK_5_MIN("Experimental Quick - adaptive 5 minute skim", 300_000L),
     BALANCED("Balanced - 10 second skim", 10_000L),
     PRECISE("Precise - 3 second skim", 3_000L)
 }
@@ -113,7 +114,8 @@ data class TransitionDetectionRequest(
     val sourceUri: Uri,
     val roi: ScanWindow,
     val profile: ScanProfile,
-    val targetFrameWidthPx: Int = 640
+    val targetFrameWidthPx: Int = 640,
+    val maxParallelRefinements: Int = 1
 )
 
 data class TransitionDetectionResult(

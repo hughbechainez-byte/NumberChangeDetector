@@ -3,8 +3,13 @@ package com.hughbechainez.numberchangedetector.scanner
 import android.content.Context
 import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -16,6 +21,20 @@ class CornerNumberTransitionDetector(
     private val samplerFactory: (android.net.Uri) -> FrameSampler = { MediaRetrieverFrameSampler(context, it) },
     private val recognizerFactory: () -> DigitRecognizer = { MlKitDigitRecognizer() }
 ) : TransitionDetector {
+
+    private data class RecognitionLane(
+        val sampler: FrameSampler,
+        val recognizer: DigitRecognizer,
+        val coarseCache: HashMap<Long, DigitEvidence> = HashMap(),
+        val exactCache: HashMap<Long, DigitEvidence> = HashMap(),
+        val owned: Boolean = true
+    ) : AutoCloseable {
+        override fun close() {
+            if (!owned) return
+            recognizer.close()
+            sampler.close()
+        }
+    }
 
     override suspend fun detect(
         request: TransitionDetectionRequest,
@@ -29,9 +48,8 @@ class CornerNumberTransitionDetector(
     ): TransitionDetectionResult {
         val started = android.os.SystemClock.elapsedRealtime()
         val warnings = ArrayList<String>()
-        val coarseCache = HashMap<Long, DigitEvidence>()
-        val exactCache = HashMap<Long, DigitEvidence>()
-        var decodedFrames = 0
+        val decodedFrames = AtomicInteger(0)
+        val ocrInferences = AtomicInteger(0)
         val roi = request.roi.normalized()
 
         suspend fun emitCore(event: CoreActivityEvent) {
@@ -51,10 +69,17 @@ class CornerNumberTransitionDetector(
                 require(metadata.encodedWidth > 0 && metadata.encodedHeight > 0) { "Video dimensions are unavailable" }
                 require(metadata.rotationDegrees in setOf(0, 90, 180, 270)) { "Unsupported rotation" }
 
-                suspend fun recognizeAt(timeMs: Long, exactPresentationTime: Boolean, aggressive: Boolean): DigitEvidence {
+                val primaryLane = RecognitionLane(sampler, recognizer, owned = false)
+
+                suspend fun recognizeWithLane(
+                    lane: RecognitionLane,
+                    timeMs: Long,
+                    exactPresentationTime: Boolean,
+                    aggressive: Boolean
+                ): DigitEvidence {
                     currentCoroutineContext().ensureActive()
                     val safeTime = timeMs.coerceIn(0L, metadata.durationMs)
-                    val cache = if (exactPresentationTime) exactCache else coarseCache
+                    val cache = if (exactPresentationTime) lane.exactCache else lane.coarseCache
                     val cached = cache[safeTime]
                     if (cached != null && (cached.parsedNumber != null || !aggressive)) {
                         emitCore(
@@ -77,7 +102,7 @@ class CornerNumberTransitionDetector(
                             requestedTimeMs = safeTime
                         )
                     )
-                    val frame = sampler.frameAt(
+                    val frame = lane.sampler.frameAt(
                         safeTime,
                         request.targetFrameWidthPx,
                         exactPresentationTime
@@ -102,7 +127,7 @@ class CornerNumberTransitionDetector(
                             )
                             cache[safeTime] = it
                         }
-                    decodedFrames++
+                    decodedFrames.incrementAndGet()
                     emitCore(
                         CoreActivityEvent(
                             CoreActivityStage.FRAME_FETCH,
@@ -144,7 +169,9 @@ class CornerNumberTransitionDetector(
                                         actualFramePtsMs = frame.presentationTimeMs
                                     )
                                 )
-                                val recognition = recognizer.recognize(prepared, aggressive)
+                                val inferenceCountBefore = lane.recognizer.inferenceCount
+                                val recognition = lane.recognizer.recognize(prepared, aggressive)
+                                ocrInferences.addAndGet((lane.recognizer.inferenceCount - inferenceCountBefore).coerceAtLeast(0))
                                 emitCore(
                                     CoreActivityEvent(
                                         CoreActivityStage.OCR,
@@ -175,6 +202,9 @@ class CornerNumberTransitionDetector(
                         frame.close()
                     }
                 }
+
+                suspend fun recognizeAt(timeMs: Long, exactPresentationTime: Boolean, aggressive: Boolean): DigitEvidence =
+                    recognizeWithLane(primaryLane, timeMs, exactPresentationTime, aggressive)
 
                 onProgress(DetectionProgress("preflight", "Opening video and warming bundled OCR", 2))
                 recognizeAt(0L, exactPresentationTime = false, aggressive = true)
@@ -208,7 +238,8 @@ class CornerNumberTransitionDetector(
                 ): Pair<List<TransitionMark>, List<TransitionBracket>> {
                     val confirmed = ArrayList<TransitionMark>()
                     val failed = ArrayList<TransitionBracket>()
-                    brackets.forEachIndexed { index, bracket ->
+
+                    suspend fun refineOne(index: Int, bracket: TransitionBracket, lane: RecognitionLane): TransitionMark? {
                         currentCoroutineContext().ensureActive()
                         val percent = progressStart +
                             ((index + 1) * progressSpan / brackets.size.coerceAtLeast(1))
@@ -219,15 +250,51 @@ class CornerNumberTransitionDetector(
                                 percent.coerceIn(0, 98)
                             )
                         )
-                        val mark = refineBracket(
+                        return refineBracket(
                             bracket = bracket,
-                            sampler = sampler,
+                            sampler = lane.sampler,
                             durationMs = metadata.durationMs,
-                            recognize = ::recognizeAt,
+                            recognize = { timeMs, exact, aggressive ->
+                                recognizeWithLane(lane, timeMs, exact, aggressive)
+                            },
                             emitCore = ::emitCore,
                             candidateIndex = index + 1,
                             candidateCount = brackets.size
                         )
+                    }
+
+                    if (brackets.isEmpty()) return confirmed to failed
+                    val laneCount = request.maxParallelRefinements.coerceIn(1, min(3, brackets.size))
+                    val lanes = ArrayList<RecognitionLane>(laneCount).apply {
+                        add(primaryLane)
+                        repeat(laneCount - 1) {
+                            add(RecognitionLane(samplerFactory(request.sourceUri), recognizerFactory()))
+                        }
+                    }
+                    if (laneCount > 1) {
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.PTS_CONFIRMATION,
+                                "parallel-refinement",
+                                "$laneCount independent decoder/OCR lanes"
+                            )
+                        )
+                    }
+                    val outcomes = try {
+                        coroutineScope {
+                            lanes.mapIndexed { laneIndex, lane ->
+                                async(Dispatchers.Default) {
+                                    brackets.withIndex()
+                                        .filter { it.index % laneCount == laneIndex }
+                                        .map { indexed -> indexed.index to refineOne(indexed.index, indexed.value, lane) }
+                                }
+                            }.awaitAll().flatten().sortedBy { it.first }
+                        }
+                    } finally {
+                        lanes.drop(1).forEach(RecognitionLane::close)
+                    }
+                    outcomes.forEach { (index, mark) ->
+                        val bracket = brackets[index]
                         if (mark == null) {
                             failed += bracket
                         } else if (confirmed.none {
@@ -277,7 +344,7 @@ class CornerNumberTransitionDetector(
                 val finalBrackets: List<TransitionBracket>
                 val marks: List<TransitionMark>
 
-                if (request.profile == ScanProfile.MONOTONIC_3_MIN) {
+                if (request.profile == ScanProfile.MONOTONIC_3_MIN || request.profile == ScanProfile.QUICK_5_MIN) {
                     val macroTimeline = sampleCheckpoints(
                         request.profile.checkpointIntervalMs,
                         progressStart = 5,
@@ -379,8 +446,8 @@ class CornerNumberTransitionDetector(
                     scannerVersion = SCANNER_VERSION,
                     wallClockMs = wallMs,
                     checkpointCount = finalTimeline.size,
-                    decodedFrameCount = decodedFrames,
-                    ocrInferenceCount = recognizer.inferenceCount,
+                    decodedFrameCount = decodedFrames.get(),
+                    ocrInferenceCount = ocrInferences.get(),
                     candidateCount = finalBrackets.size,
                     confirmedTransitionCount = marks.size,
                     videoToWallSpeed = if (wallMs > 0L) metadata.durationMs.toFloat() / wallMs else 0f
