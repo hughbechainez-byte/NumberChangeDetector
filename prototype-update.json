@@ -1,11 +1,19 @@
 {
-  "version": "0.6.0",
-  "versionCode": 8,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.0/CompilationMaker-Prototype-v0.6.0.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.0",
-  "sha256": "c44cf61a691a2f5b5509fc10e7b3ba6d765a6495ca29d0029ff84cb2d0d176a5",
-  "notes": "Adds opt-in Experimental Quick Mode with adaptive five-minute checkpoints, smaller ROI-focused decoding, hardware-scaled parallel refinement, thermal protection, and optimized Media3 export.",
+  "version": "0.6.1",
+  "versionCode": 9,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.1/CompilationMaker-Prototype-v0.6.1.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.1",
+  "sha256": "be2e328fcfabd4d3304c46d17a16f9156b57a431a50b6804706ff299da3fdb77",
+  "notes": "Quick Mode now isolates its 384px probe from a fresh full-resolution 640px safety fallback, preserving proven timestamp accuracy whenever the adaptive path is uncertain.",
   "updates": [
+    {
+      "version": "0.6.1",
+      "versionCode": 9,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.1/CompilationMaker-Prototype-v0.6.1.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.1",
+      "sha256": "be2e328fcfabd4d3304c46d17a16f9156b57a431a50b6804706ff299da3fdb77",
+      "notes": "Quick Mode keeps its fast 384px five-minute probe, but any uncertainty now creates fresh 640px decoder/OCR lanes for the complete 30-second fallback and exact-boundary refinement instead of reusing low-resolution evidence."
+    },
     {
       "version": "0.6.0",
       "versionCode": 8,
