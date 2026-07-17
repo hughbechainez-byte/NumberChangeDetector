@@ -25,6 +25,7 @@ class CornerNumberTransitionDetector(
     private data class RecognitionLane(
         val sampler: FrameSampler,
         val recognizer: DigitRecognizer,
+        val targetFrameWidthPx: Int,
         val coarseCache: HashMap<Long, DigitEvidence> = HashMap(),
         val exactCache: HashMap<Long, DigitEvidence> = HashMap(),
         val owned: Boolean = true
@@ -69,7 +70,12 @@ class CornerNumberTransitionDetector(
                 require(metadata.encodedWidth > 0 && metadata.encodedHeight > 0) { "Video dimensions are unavailable" }
                 require(metadata.rotationDegrees in setOf(0, 90, 180, 270)) { "Unsupported rotation" }
 
-                val primaryLane = RecognitionLane(sampler, recognizer, owned = false)
+                val primaryLane = RecognitionLane(
+                    sampler = sampler,
+                    recognizer = recognizer,
+                    targetFrameWidthPx = request.targetFrameWidthPx,
+                    owned = false
+                )
 
                 suspend fun recognizeWithLane(
                     lane: RecognitionLane,
@@ -98,13 +104,13 @@ class CornerNumberTransitionDetector(
                         CoreActivityEvent(
                             CoreActivityStage.FRAME_FETCH,
                             "request",
-                            "targetWidth=${request.targetFrameWidthPx}px exactPts=$exactPresentationTime",
+                            "targetWidth=${lane.targetFrameWidthPx}px exactPts=$exactPresentationTime",
                             requestedTimeMs = safeTime
                         )
                     )
                     val frame = lane.sampler.frameAt(
                         safeTime,
-                        request.targetFrameWidthPx,
+                        lane.targetFrameWidthPx,
                         exactPresentationTime
                     )
                         ?: return DigitEvidence(
@@ -213,11 +219,17 @@ class CornerNumberTransitionDetector(
                     intervalMs: Long,
                     progressStart: Int,
                     progressSpan: Int,
-                    label: String
+                    label: String,
+                    lane: RecognitionLane = primaryLane
                 ): List<StatePoint> {
                     val times = generateCheckpointTimestamps(metadata.durationMs, intervalMs)
                     return times.mapIndexed { index, timeMs ->
-                        val evidence = recognizeAt(timeMs, exactPresentationTime = false, aggressive = true)
+                        val evidence = recognizeWithLane(
+                            lane,
+                            timeMs,
+                            exactPresentationTime = false,
+                            aggressive = true
+                        )
                         val percent = progressStart +
                             ((index + 1) * progressSpan / times.size.coerceAtLeast(1))
                         onProgress(
@@ -234,7 +246,8 @@ class CornerNumberTransitionDetector(
                 suspend fun refineAll(
                     brackets: List<TransitionBracket>,
                     progressStart: Int,
-                    progressSpan: Int
+                    progressSpan: Int,
+                    baseLane: RecognitionLane = primaryLane
                 ): Pair<List<TransitionMark>, List<TransitionBracket>> {
                     val confirmed = ArrayList<TransitionMark>()
                     val failed = ArrayList<TransitionBracket>()
@@ -266,9 +279,15 @@ class CornerNumberTransitionDetector(
                     if (brackets.isEmpty()) return confirmed to failed
                     val laneCount = request.maxParallelRefinements.coerceIn(1, min(3, brackets.size))
                     val lanes = ArrayList<RecognitionLane>(laneCount).apply {
-                        add(primaryLane)
+                        add(baseLane)
                         repeat(laneCount - 1) {
-                            add(RecognitionLane(samplerFactory(request.sourceUri), recognizerFactory()))
+                            add(
+                                RecognitionLane(
+                                    sampler = samplerFactory(request.sourceUri),
+                                    recognizer = recognizerFactory(),
+                                    targetFrameWidthPx = baseLane.targetFrameWidthPx
+                                )
+                            )
                         }
                     }
                     if (laneCount > 1) {
@@ -291,7 +310,7 @@ class CornerNumberTransitionDetector(
                             }.awaitAll().flatten().sortedBy { it.first }
                         }
                     } finally {
-                        lanes.drop(1).forEach(RecognitionLane::close)
+                        lanes.filter { it !== baseLane }.forEach(RecognitionLane::close)
                     }
                     outcomes.forEach { (index, mark) ->
                         val bracket = brackets[index]
@@ -317,27 +336,45 @@ class CornerNumberTransitionDetector(
                         )
                     )
                     onProgress(DetectionProgress("coarse_scan", "Monotonic safety fallback: $reason", 81))
-                    val fallbackTimeline = despikeStatePoints(
-                        sampleCheckpoints(
-                            ScanProfile.FAST.checkpointIntervalMs,
-                            progressStart = 81,
-                            progressSpan = 9,
-                            label = "Fallback checkpoint"
+                    val fallbackLane = RecognitionLane(
+                        sampler = samplerFactory(request.sourceUri),
+                        recognizer = recognizerFactory(),
+                        targetFrameWidthPx = request.fallbackFrameWidthPx
+                    )
+                    return try {
+                        emitCore(
+                            CoreActivityEvent(
+                                CoreActivityStage.MONOTONIC_PLANNING,
+                                "fallback-full-resolution",
+                                "fresh ${request.fallbackFrameWidthPx}px decoder/OCR lane"
+                            )
                         )
-                    )
-                    val fallbackBrackets = buildTransitionBrackets(fallbackTimeline)
-                    if (fallbackBrackets.any { it.fromNumber != null && it.toNumber != it.fromNumber + 1 }) {
-                        warnings += "One or more fallback coarse states were non-sequential; inspect those rows before integration."
+                        val fallbackTimeline = despikeStatePoints(
+                            sampleCheckpoints(
+                                ScanProfile.FAST.checkpointIntervalMs,
+                                progressStart = 81,
+                                progressSpan = 9,
+                                label = "Fallback checkpoint",
+                                lane = fallbackLane
+                            )
+                        )
+                        val fallbackBrackets = buildTransitionBrackets(fallbackTimeline)
+                        if (fallbackBrackets.any { it.fromNumber != null && it.toNumber != it.fromNumber + 1 }) {
+                            warnings += "One or more fallback coarse states were non-sequential; inspect those rows before integration."
+                        }
+                        val (fallbackMarks, failedFallback) = refineAll(
+                            fallbackBrackets,
+                            progressStart = 91,
+                            progressSpan = 7,
+                            baseLane = fallbackLane
+                        )
+                        failedFallback.forEach { bracket ->
+                            warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
+                        }
+                        Triple(fallbackTimeline, fallbackBrackets, fallbackMarks)
+                    } finally {
+                        fallbackLane.close()
                     }
-                    val (fallbackMarks, failedFallback) = refineAll(
-                        fallbackBrackets,
-                        progressStart = 91,
-                        progressSpan = 7
-                    )
-                    failedFallback.forEach { bracket ->
-                        warnings += "Could not persistently confirm ${bracket.fromNumber ?: "none"} -> ${bracket.toNumber} in ${formatTimestampMs(bracket.startMs)}..${formatTimestampMs(bracket.endMs)}"
-                    }
-                    return Triple(fallbackTimeline, fallbackBrackets, fallbackMarks)
                 }
 
                 val finalTimeline: List<StatePoint>

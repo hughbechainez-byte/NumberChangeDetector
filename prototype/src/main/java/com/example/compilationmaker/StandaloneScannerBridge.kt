@@ -75,6 +75,7 @@ internal class StandaloneScannerBridge(private val context: Context) {
                 ),
                 profile = profile,
                 targetFrameWidthPx = if (quickMode) QUICK_MODE_FRAME_WIDTH_PX else 640,
+                fallbackFrameWidthPx = 640,
                 maxParallelRefinements = if (quickMode) quickModeParallelism(context) else 1
             ),
             onProgress = { detectorProgress ->

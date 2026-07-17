@@ -115,6 +115,7 @@ data class TransitionDetectionRequest(
     val roi: ScanWindow,
     val profile: ScanProfile,
     val targetFrameWidthPx: Int = 640,
+    val fallbackFrameWidthPx: Int = 640,
     val maxParallelRefinements: Int = 1
 )
 
