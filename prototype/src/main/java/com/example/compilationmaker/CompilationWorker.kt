@@ -53,6 +53,8 @@ class CompilationWorker(
         val scanWindowRaw = inputData.getString(KEY_SCAN_WINDOW)
         val expectedOutputPath = inputData.getString(CompilationJobContract.KEY_EXPECTED_OUTPUT_PATH).orEmpty()
         val expectedOutputFile = expectedOutputPath.takeIf { it.isNotBlank() }?.let(::File)
+        val artifactId = inputData.getString(KEY_ARTIFACT_ID).orEmpty()
+        val artifactStore = CompilationArtifactStore(applicationContext)
 
         if (sourceUriRaw.isNullOrBlank()) {
             val message = "Missing source video"
@@ -66,6 +68,7 @@ class CompilationWorker(
         }
 
         setProgressCompat("starting", "Preparing compilation", 0)
+        if (artifactId.isNotBlank()) artifactStore.update(artifactId) { it.copy(state = "PREPARING") }
 
         val sourceUri = runCatching { Uri.parse(sourceUriRaw) }.getOrNull()
             ?: run {
@@ -258,10 +261,29 @@ class CompilationWorker(
                 if (!isActive) throw CancellationException("Job cancelled")
             }
             outputForCleanup = renderedOutput.file
+            if (artifactId.isNotBlank()) artifactStore.update(artifactId) {
+                it.copy(
+                    state = "RENDER_COMPLETE",
+                    canonicalPath = renderedOutput.file.canonicalPath,
+                    fileSize = renderedOutput.file.length(),
+                    renderCompletedAt = System.currentTimeMillis(),
+                    verificationState = "PENDING"
+                )
+            }
 
             setProgressCompat("verify", "Verifying compilation output", 96, fallbackUsed)
             setForegroundCompat("verify", "Verifying compilation output", 96)
             val verifiedOutput = engine.verifyCompilationOutput(renderedOutput.file)
+            if (artifactId.isNotBlank()) artifactStore.update(artifactId) {
+                it.copy(
+                    state = "FILE_VERIFIED",
+                    canonicalPath = verifiedOutput.file.canonicalPath,
+                    fileSize = verifiedOutput.sizeBytes,
+                    actualDurationMs = verifiedOutput.durationMs,
+                    verificationState = "VERIFIED",
+                    cleanupEligibility = "INELIGIBLE"
+                )
+            }
             val evidence = OutputVerificationEvidence(
                 uri = verifiedOutput.uri,
                 exists = verifiedOutput.file.exists(),
@@ -340,12 +362,11 @@ class CompilationWorker(
             )
             Result.success(result)
         } catch (cancelled: CancellationException) {
+            if (artifactId.isNotBlank()) artifactStore.update(artifactId) {
+                it.copy(state = "CANCELLED_WITH_PARTIAL", cleanupEligibility = "USER_DISCARD_ONLY")
+            }
             outputForCleanup?.takeIf { it.exists() }?.let { partial ->
-                runCatching {
-                    check(partial.delete()) { "Unable to delete partial output ${partial.absolutePath}" }
-                }.onFailure {
-                    AppLog.w(applicationContext, "CompilationWorker", "Cancellation cleanup failed: ${partial.absolutePath}", it)
-                }
+                AppLog.i(applicationContext, "CompilationWorker", "[cleanup] retaining cancelled artifact ${partial.absolutePath}")
             }
             val decision = decidePipelineTerminalOutcome(0, 0, null, userCancelled = true)
             val cancelledAtPercent = jobStore.load()?.takeIf { it.workId == workId }?.progressPercent ?: 0
@@ -713,6 +734,7 @@ class CompilationWorker(
 
     companion object {
         const val KEY_SOURCE_URI = "sourceUri"
+        const val KEY_ARTIFACT_ID = "artifactId"
         const val KEY_SCAN_WINDOW = "scanWindow"
         const val KEY_SCAN_MODE = "scanMode"
         const val KEY_CHECKPOINT_INTERVAL_MS = "checkpointIntervalMs"

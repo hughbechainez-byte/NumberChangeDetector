@@ -1356,7 +1356,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun compilationContentUri(file: File): Uri = FileProvider.getUriForFile(
         this,
-        "$packageName.updateprovider",
+        "$packageName.compilationprovider",
         file
     )
 
@@ -4432,17 +4432,11 @@ class VideoCompilationEngine(private val context: Context) : AutoCloseable {
             progress("Compilation ready to save", 94)
             return@withContext verified
         } catch (cancelled: CancellationException) {
-            if (output.exists()) {
-                runCatching { check(output.delete()) { "Unable to delete partial output ${output.absolutePath}" } }
-                    .onFailure { AppLog.w(context, tag, "Cancellation cleanup failed", it) }
-            }
+            AppLog.i(context, tag, "[cleanup] render cancelled; retaining output for recovery path=${output.absolutePath}")
             throw cancelled
         } catch (e: Exception) {
             recordHandledWorkerFailure(context, tag, "[export] failed after ${SystemClock.elapsedRealtime() - exportStarted} ms", e)
-            if (output.exists()) {
-                runCatching { output.delete() }
-                    .onFailure { AppLog.w(context, tag, "Partial output cleanup failed: ${output.absolutePath}", it) }
-            }
+            AppLog.w(context, tag, "[cleanup] render/post-render failure; output retained path=${output.absolutePath}", e)
             throw e
         }
     }
@@ -5683,49 +5677,13 @@ class VideoCompilationEngine(private val context: Context) : AutoCloseable {
     }
 
     private fun validateExportOutput(output: File): VerifiedCompilationOutput {
-        if (!output.exists() || !output.isFile || !output.canRead() || output.length() <= 0L) {
-            throw IllegalStateException("Exported compilation was not written successfully")
-        }
-        output.inputStream().use { input ->
-            if (input.read() < 0) throw IllegalStateException("Exported compilation cannot be opened")
-        }
-        val retriever = MediaMetadataRetriever()
-        val extractor = MediaExtractor()
-        var durationMs = 0L
-        try {
-            retriever.setDataSource(output.absolutePath)
-            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            if (durationMs <= 0L) {
-                throw IllegalStateException("Exported compilation has no readable duration")
-            }
-            extractor.setDataSource(output.absolutePath)
-            val hasVideo = (0 until extractor.trackCount).any { trackIndex ->
-                extractor.getTrackFormat(trackIndex).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-            }
-            if (!hasVideo) {
-                throw IllegalStateException("Exported compilation has no video track")
-            }
-        } finally {
-            runCatching { retriever.release() }
-                .onFailure { AppLog.w(context, tag, "Verification retriever cleanup failed", it) }
-            runCatching { extractor.release() }
-                .onFailure { AppLog.w(context, tag, "Verification extractor cleanup failed", it) }
-        }
-        val readableUri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.updateprovider",
-            output
-        )
-        context.contentResolver.openInputStream(readableUri).use { input ->
-            if (input == null || input.read() < 0) {
-                throw IllegalStateException("Exported compilation URI cannot be opened")
-            }
-        }
+        val verified = OutputVerifier().verify(output)
+        val readableUri = output.toURI().toString()
         return VerifiedCompilationOutput(
             file = output,
             uri = readableUri.toString(),
-            sizeBytes = output.length(),
-            durationMs = durationMs
+            sizeBytes = verified.sizeBytes,
+            durationMs = verified.durationMs
         )
     }
 

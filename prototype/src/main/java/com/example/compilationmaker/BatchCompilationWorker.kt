@@ -42,9 +42,26 @@ class BatchCompilationWorker(context: Context, params: WorkerParameters) : Corou
                 ensureActive()
                 val itemStarted = System.currentTimeMillis()
                 store.update { record -> record.withItem(index) { it.copy(state = "running", elapsedMs = 0L) } }
-                val output = createOutputFile(batchId, index, format)
+                val artifact = CompilationStorageLayout(applicationContext).newArtifact(format, item.label)
+                artifact.directory.mkdirs()
+                val output = artifact.partial
+                val artifactStore = CompilationArtifactStore(applicationContext)
+                check(artifactStore.save(CompilationArtifactRecord(
+                    artifactId = artifact.artifactId,
+                    jobId = id.toString(),
+                    batchId = batchId,
+                    itemIndex = index,
+                    itemCount = items.size,
+                    sourceUri = item.uri,
+                    stagingPath = artifact.directory.absolutePath,
+                    canonicalPath = output.absolutePath,
+                    displayName = item.label,
+                    mimeType = format.mimeType,
+                    state = "QUEUED"
+                ))) { "Unable to persist recovery record for ${artifact.artifactId}" }
                 val childData = androidx.work.Data.Builder()
                     .putString(CompilationWorker.KEY_SOURCE_URI, item.uri)
+                    .putString(CompilationWorker.KEY_ARTIFACT_ID, artifact.artifactId)
                     .putString(CompilationJobContract.KEY_EXPECTED_OUTPUT_PATH, output.absolutePath)
                     .putString(CompilationWorker.KEY_SCAN_WINDOW, inputData.getString(CompilationWorker.KEY_SCAN_WINDOW))
                     .putInt(CompilationWorker.KEY_SCAN_MODE, inputData.getInt(CompilationWorker.KEY_SCAN_MODE, ScanMode.StableCheckpoint.ordinal))
@@ -76,10 +93,26 @@ class BatchCompilationWorker(context: Context, params: WorkerParameters) : Corou
                     if (info?.state?.isFinished != true) delay(500L)
                 } while (info?.state?.isFinished != true)
                 val elapsed = System.currentTimeMillis() - itemStarted
-                val outputPath = info?.outputData?.getString(CompilationWorker.KEY_OUTPUT_PATH).orEmpty().ifBlank { output.absolutePath.takeIf { File(it).exists() }.orEmpty() }
+                val outputPath = info?.outputData?.getString(CompilationWorker.KEY_OUTPUT_PATH).orEmpty().ifBlank {
+                    output.absolutePath.takeIf { File(it).exists() }?.orEmpty()
+                        ?: artifact.rendered.absolutePath.takeIf { File(it).exists() }.orEmpty()
+                }
                 val failed = info?.state != WorkInfo.State.SUCCEEDED
                 val error = info?.outputData?.getString(CompilationWorker.KEY_ERROR_MESSAGE).orEmpty()
-                store.update { record -> record.withItem(index) { it.copy(state = if (failed) "failed" else "completed", elapsedMs = elapsed, outputPath = outputPath, error = error) } }
+                val artifactRecord = artifactStore.load(artifact.artifactId)
+                val publishedUri = if (!failed && artifactRecord != null && File(outputPath).exists()) {
+                    runCatching { CompilationPublisher(applicationContext).publish(artifactRecord, File(outputPath)) }
+                        .onSuccess { uri -> artifactStore.update(artifact.artifactId) { it.copy(state = "PUBLISHED", publicationState = "PUBLISHED", mediaStoreUri = uri.toString()) } }
+                        .onFailure { failure -> artifactStore.update(artifact.artifactId) { it.copy(state = "RECOVERABLE_OUTPUT", publicationState = "FAILED", failureCategory = "MediaStorePublicationFailure", lastError = failure.message.orEmpty(), cleanupEligibility = "USER_DISCARD_ONLY") } }
+                        .getOrNull()
+                } else null
+                val itemState = when {
+                    failed -> "failed"
+                    publishedUri != null -> "completed"
+                    else -> "recoverable"
+                }
+                val itemError = error.ifBlank { if (publishedUri == null && !failed) "Rendered output retained; publication failed" else "" }
+                store.update { record -> record.withItem(index) { it.copy(state = itemState, elapsedMs = elapsed, outputPath = outputPath, error = itemError) } }
             }
             val elapsed = System.currentTimeMillis() - startedAt
             setProgress(workDataOf(KEY_INDEX to items.size, KEY_TOTAL to items.size, KEY_PERCENT to 100, KEY_ELAPSED_MS to elapsed, KEY_STATUS to "Batch complete"))
@@ -92,11 +125,6 @@ class BatchCompilationWorker(context: Context, params: WorkerParameters) : Corou
             setProgress(workDataOf(KEY_PERCENT to 100, KEY_ELAPSED_MS to elapsed, KEY_STATUS to "Batch stopped: ${failure.message.orEmpty()}"))
             Result.failure(workDataOf(KEY_ERROR to (failure.message ?: failure::class.java.simpleName), KEY_ELAPSED_MS to elapsed))
         }
-    }
-
-    private fun createOutputFile(batchId: String, index: Int, format: ExportFormat): File {
-        val dir = File(applicationContext.getExternalFilesDir("movies"), "CompilationMaker").apply { mkdirs() }
-        return File(dir, "batch_${batchId.take(12)}_${index + 1}.${format.extension}")
     }
 
     private fun makeForeground(message: String, percent: Int): ForegroundInfo {

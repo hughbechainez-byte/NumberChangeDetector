@@ -40,8 +40,8 @@ internal class Media3CompilationExporter(context: Context) {
             "Every export segment must have positive duration"
         }
         output.parentFile?.mkdirs()
-        if (output.exists() && !output.delete()) {
-            throw IllegalStateException("Unable to replace existing output ${output.absolutePath}")
+        if (output.exists()) {
+            throw IllegalStateException("Refusing to overwrite existing compilation artifact ${output.absolutePath}")
         }
 
         suspendCancellableCoroutine { continuation ->
