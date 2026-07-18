@@ -5,10 +5,10 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 
 class CompilationPublisher(context: Context) {
     private val appContext = context.applicationContext
@@ -34,13 +34,17 @@ class CompilationPublisher(context: Context) {
         try {
             resolver.openFileDescriptor(uri, "w")?.use { descriptor ->
                 FileInputStream(source).use { input ->
-                    FileOutputStream(descriptor.fileDescriptor).use { output ->
+                    ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
                         input.copyTo(output, 1024 * 1024)
                         output.flush()
                         output.fd.sync()
                     }
                 }
             } ?: error("MediaStore write failed")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val finalValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                require(resolver.update(uri, finalValues, null, null) == 1) { "MediaStore finalize failed" }
+            }
             val actualSize = resolver.openInputStream(uri)?.use { input ->
                 val buffer = ByteArray(1024 * 1024)
                 var total = 0L
@@ -52,10 +56,6 @@ class CompilationPublisher(context: Context) {
                 total
             } ?: -1L
             require(actualSize == source.length()) { "PublicationVerificationFailure: size $actualSize != ${source.length()}" }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val finalValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
-                require(resolver.update(uri, finalValues, null, null) == 1) { "MediaStore finalize failed" }
-            }
             finalized = true
             return uri
         } finally {
