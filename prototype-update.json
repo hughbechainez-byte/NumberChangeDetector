@@ -1,11 +1,19 @@
 {
-  "version": "0.6.1",
-  "versionCode": 9,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.1/CompilationMaker-Prototype-v0.6.1.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.1",
-  "sha256": "be2e328fcfabd4d3304c46d17a16f9156b57a431a50b6804706ff299da3fdb77",
-  "notes": "Quick Mode now isolates its 384px probe from a fresh full-resolution 640px safety fallback, preserving proven timestamp accuracy whenever the adaptive path is uncertain.",
+  "version": "0.6.2",
+  "versionCode": 10,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.2/CompilationMaker-Prototype-v0.6.2.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.2",
+  "sha256": "7f1cb8e1ec4a475deca7c656bb0146ff07daa510bc4095aea24c5885b9886244",
+  "notes": "Preserves completed batch renders after post-render URI failures, adds durable artifact recovery, collision-safe staging, direct media verification, separate compilation sharing roots, and MediaStore publication.",
   "updates": [
+    {
+      "version": "0.6.2",
+      "versionCode": 10,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.2/CompilationMaker-Prototype-v0.6.2.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.2",
+      "sha256": "7f1cb8e1ec4a475deca7c656bb0146ff07daa510bc4095aea24c5885b9886244",
+      "notes": "Preserves completed batch renders after post-render URI failures, adds durable artifact recovery, collision-safe staging, direct media verification, separate compilation sharing roots, and MediaStore publication."
+    },
     {
       "version": "0.6.1",
       "versionCode": 9,
