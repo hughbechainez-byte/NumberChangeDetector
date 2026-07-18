@@ -1,11 +1,19 @@
 {
-  "version": "0.6.2",
-  "versionCode": 10,
-  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.2/CompilationMaker-Prototype-v0.6.2.apk",
-  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.2",
-  "sha256": "312f244ab867c254f67bc3a3eeb6e7170c5c195f2a418c8c84d8196a93c6464f",
-  "notes": "Preserves completed batch renders after post-render URI failures, adds durable artifact recovery, collision-safe staging, direct media verification, separate compilation sharing roots, and MediaStore publication.",
+  "version": "0.6.3",
+  "versionCode": 11,
+  "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.3/CompilationMaker-Prototype-v0.6.3.apk",
+  "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.3",
+  "sha256": "693f7e259077acdc961a0ea5fdfc88d4988c270f5be4ebb9e6af5266767d8c46",
+  "notes": "Fixes batch publication so each rendered item is copied and finalized independently, while retaining staging on publication failure.",
   "updates": [
+    {
+      "version": "0.6.3",
+      "versionCode": 11,
+      "apkUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/download/v0.6.3/CompilationMaker-Prototype-v0.6.3.apk",
+      "releaseUrl": "https://github.com/hughbechainez-byte/NumberChangeDetector/releases/tag/v0.6.3",
+      "sha256": "693f7e259077acdc961a0ea5fdfc88d4988c270f5be4ebb9e6af5266767d8c46",
+      "notes": "Fixes batch publication so each rendered item is copied and finalized independently, while retaining staging on publication failure."
+    },
     {
       "version": "0.6.2",
       "versionCode": 10,
